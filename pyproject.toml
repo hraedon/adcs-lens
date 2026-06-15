@@ -1,0 +1,54 @@
+[project]
+name = "adcs-lens"
+version = "0.1.0"
+description = "Local-first, read-only AD CS / PKI posture analysis"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "hraedon" }]
+# The deterministic core is stdlib-only by charter (portable, air-gappable).
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.7",
+    "mypy>=1.13",
+]
+# Cert/CRL (DER) parsing for the lifecycle path. The core never imports this;
+# when absent, lifecycle fields are None and lifecycle checks degrade to a note.
+certs = [
+    "cryptography>=43",
+]
+# Optional layers, later plans — kept out of the truth path.
+narration = []
+web = []
+
+[project.scripts]
+adcs-lens = "adcs_lens.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/adcs_lens"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "samples: requires a real AD CS export in samples/ (skipped when absent)",
+    "certs: requires the [certs] extra (cryptography) for DER cert/CRL parsing",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true

@@ -1,0 +1,25 @@
+# Real AD CS exports — never committed (contain CA names, OIDs, SIDs, domain).
+# Analysis happens on copies under samples/; fixtures are synthetic only.
+samples/
+
+# Local snapshot DB (later plan) and any runtime data
+*.db
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Editors / OS
+.DS_Store
+*.swp

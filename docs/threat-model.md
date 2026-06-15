@@ -1,0 +1,74 @@
+# AD CS threat model & detectability boundary
+
+This is the design spine of adcs-lens. It catalogues the AD CS weakness classes
+the tool reasons about and — critically — classifies each by **what a read-only
+configuration export can actually detect statically**, versus what would require
+active probing the tool will never do.
+
+The detectability column *is* the "flag, don't probe" principle made concrete:
+
+- **Static** — the enabling condition is fully readable from exported
+  configuration. adcs-lens detects it deterministically.
+- **Static (enabling config)** — the *prerequisite* is readable, but confirming
+  exploitability requires runtime conditions (e.g. an NTLM relay, an RPC call).
+  adcs-lens flags the prerequisite and says so; it never confirms by probing.
+- **Out** — detection inherently requires authenticating, enrolling, relaying,
+  or otherwise acting against live AD CS. Explicitly out of scope.
+
+## ESC catalogue
+
+| ID | What it is | Detectability | Primary data source |
+|----|-----------|---------------|---------------------|
+| ESC1 | Template allows requester-supplied SAN + client-auth EKU, enrollable by low-priv | **Static** | template `msPKI-Certificate-Name-Flag` (ENROLLEE_SUPPLIES_SUBJECT), EKU list, enroll ACL |
+| ESC2 | Template with Any-Purpose EKU or no EKU (SubCA-equivalent) | **Static** | template `pKIExtendedKeyUsage` / EKU absence |
+| ESC3 | Enrollment-Agent (Certificate Request Agent) EKU usable by low-priv | **Static** | template EKU + enroll ACL |
+| ESC4 | Template object ACL grants write to low-priv (can be edited into ESC1) | **Static** | template `nTSecurityDescriptor` |
+| ESC5 | Writable ACL on PKI objects (CA objects, NTAuth, PKS containers) | **Static** | container/object `nTSecurityDescriptor` |
+| ESC6 | `EDITF_ATTRIBUTESUBJECTALTNAME2` set on the CA | **Static** | CA registry `policy\EditFlags` (`certutil -getreg`) |
+| ESC7 | CA permissions (ManageCA / ManageCertificates) held by low-priv | **Static** | CA security descriptor (`certutil -getreg CA\Security`) |
+| ESC8 | NTLM relay to HTTP/RPC enrollment (Web Enrollment / CES) | **Static (enabling config)** — detect role installed + EPA off; relay itself is **Out** | role/endpoint inventory; IIS EPA setting |
+| ESC9 | `CT_FLAG_NO_SECURITY_EXTENSION` on template (weak mapping) | **Static** | template `msPKI-Enrollment-Flag` |
+| ESC10 | Weak certificate mappings on DCs (`StrongCertificateBindingEnforcement` / `CertificateMappingMethods`) | **Static** (needs DC registry in export) | DC registry export |
+| ESC11 | `IF_ENFORCEENCRYPTICERTREQUEST` off → RPC (ICertPassage) relay | **Static (enabling config)** — flag the flag; relay is **Out** | CA registry `InterfaceFlags` (`certutil -getreg`) |
+| ESC13 | Issuance-policy OID linked to a privileged group | **Static** | template `msPKI-Certificate-Policy` + `msDS-OIDToGroupLink` on the OID object |
+| ESC14 | Weak explicit cert mapping via `altSecurityIdentities` | **Static** (needs AD object read in export) | AD principal `altSecurityIdentities` |
+| ESC15 | EKUwu (CVE-2024-49019): v1 template + application policies in request | **Static (enabling config)** — flag vulnerable v1 templates + CA patch state; request-side is **Out** | template schema version + name flags; CA build/patch level |
+
+## Non-ESC hygiene & lifecycle
+
+These are the checks that matter most to a legacy shop on an audit clock and are
+under-served by the offensive tooling entirely:
+
+| Check | What it catches | Detectability | Source |
+|-------|----------------|---------------|--------|
+| CA cert expiry | Root/sub-CA certificate approaching/past expiry | **Static** | CA cert in export |
+| CRL signing expiry | The CRL signing cert expiring — silent estate-wide auth failure | **Static** | CA config / CRL |
+| CRL freshness | Published CRL stale or overdue vs. its validity period | **Static** | exported CRL + config |
+| CDP / AIA reachability | Distribution points declared but unreachable/misconfigured | **Static (declared)** — config only; no live fetch | CA config |
+| Weak signing algorithm | CA signing with SHA-1 / MD5 | **Static** | CA cert / config |
+| Weak key length | CA or template minimum key size below policy | **Static** | CA cert; template `msPKI-Minimal-Key-Size` |
+| Audit configuration | CA auditing disabled or under-scoped | **Static** | CA registry `AuditFilter` |
+| Orphaned / unused templates | Published templates nobody should still enroll | **Static** | published-templates list vs. template inventory |
+
+## Implications for the data model & collector
+
+The detectability table dictates what the read-only collector must capture, and
+nothing more:
+
+1. **CA registry configuration** — `certutil -getreg` (CA, policy, and security
+   hives): `EditFlags`, `InterfaceFlags`, `AuditFilter`, role security.
+2. **AD Public Key Services container** (Configuration NC): `pKICertificateTemplate`
+   objects with all `msPKI-*` attributes and EKUs; Certification Authorities;
+   Enrollment Services; NTAuthCertificates; OID objects (for ESC13). Each with
+   its `nTSecurityDescriptor`.
+3. **Certificates & CRLs**: CA/sub-CA certs and the current CRL(s) for lifecycle
+   and algorithm/key checks.
+4. **Role/endpoint inventory**: which AD CS roles are installed (Web Enrollment,
+   CES/CEP) for the ESC8 *enabling-config* flag.
+5. **(Optional, for ESC10/ESC14)** targeted DC registry values and principal
+   `altSecurityIdentities` — gated, because they widen the export footprint.
+
+Everything above is obtainable read-only with `certutil`, the AD CS PowerShell
+module, and LDAP reads against the Configuration NC. No item requires
+authenticating *as* an enrollee or issuing a request — which is exactly why the
+tool can stay defensive.
