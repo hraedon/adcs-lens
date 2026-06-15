@@ -1,6 +1,10 @@
 # Plan 001 — Data model & collector
 
-**Status:** proposed 2026-06-13
+**Status:** Phases 0, 2, 3 **built 2026-06-15** (package + CI on 3.12/3.13,
+model, ingest, ESC6 + infra cert/CRL-expiry detectors, `doctor` CLI, synthetic
+fixtures, architecture guard — all gates green). **Phase 1 (the read-only
+PowerShell collector) is the remaining work** — it needs lab calibration on
+`LABCA01`; the fixture generator stands in until then. (proposed 2026-06-13)
 **Author:** Opus 4.8 (charter + threat-model derivation)
 **Strategic role:** adcs-lens is charter-stage — `README.md`, `AGENTS.md`, and
 `docs/threat-model.md` exist; there is no code. This plan turns the threat
