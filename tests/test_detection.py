@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 
 from adcs_lens.detection import (
     detect_esc1,
+    detect_esc2,
+    detect_esc3,
     detect_esc4,
     detect_esc6,
     detect_esc7,
@@ -32,6 +34,8 @@ NOW = datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC)
 
 CLIENT_AUTH = "1.3.6.1.5.5.7.3.2"
 SERVER_AUTH = "1.3.6.1.5.5.7.3.1"
+ANY_PURPOSE = "2.5.29.37.0"
+ENROLLMENT_AGENT = "1.3.6.1.4.1.311.20.2.1"
 LOW_PRIV_SID = "S-1-5-21-1111111111-2222222222-3333333333-513"  # Domain Users
 HIGH_PRIV_SID = "S-1-5-21-1111111111-2222222222-3333333333-512"  # Domain Admins
 
@@ -190,6 +194,70 @@ def test_esc1_degrades_when_template_security_not_collected() -> None:
     assert len(findings) == 1
     assert findings[0].check == "TEMPLATE_ACL_NOT_EVALUATED"
     assert findings[0].severity == Severity.INFO
+
+
+# --- ESC2 -----------------------------------------------------------------
+
+
+def test_esc2_any_purpose_eku_flagged() -> None:
+    tmpl = _template("AnyPurpose", ekus=(ANY_PURPOSE,), security=(_enroll_ace(),))
+    findings = detect_esc2(_estate(templates=(tmpl,)))
+    assert len(findings) == 1
+    assert findings[0].check == "ESC2"
+    assert findings[0].severity == Severity.HIGH
+
+
+def test_esc2_no_eku_flagged() -> None:
+    tmpl = _template("NoEku", ekus=(), security=(_enroll_ace(),))
+    assert len(detect_esc2(_estate(templates=(tmpl,)))) == 1
+
+
+def test_esc2_constrained_eku_not_flagged() -> None:
+    tmpl = _template("Web", ekus=(SERVER_AUTH,), security=(_enroll_ace(),))
+    assert detect_esc2(_estate(templates=(tmpl,))) == []
+
+
+def test_esc2_requires_low_priv_enroll() -> None:
+    tmpl = _template("AnyPurpose", ekus=(ANY_PURPOSE,), security=(_enroll_ace(HIGH_PRIV_SID),))
+    assert detect_esc2(_estate(templates=(tmpl,))) == []
+
+
+def test_esc2_mitigated_by_manager_approval() -> None:
+    tmpl = _template(
+        "AnyPurpose",
+        ekus=(ANY_PURPOSE,),
+        enrollment_flags=("PEND_ALL_REQUESTS",),
+        security=(_enroll_ace(),),
+    )
+    assert detect_esc2(_estate(templates=(tmpl,))) == []
+
+
+# --- ESC3 -----------------------------------------------------------------
+
+
+def test_esc3_enrollment_agent_eku_flagged() -> None:
+    tmpl = _template("Agent", ekus=(ENROLLMENT_AGENT,), security=(_enroll_ace(),))
+    findings = detect_esc3(_estate(templates=(tmpl,)))
+    assert len(findings) == 1
+    assert findings[0].check == "ESC3"
+    assert findings[0].severity == Severity.HIGH
+
+
+def test_esc3_not_flagged_without_agent_eku() -> None:
+    tmpl = _template("Plain", ekus=(CLIENT_AUTH,), security=(_enroll_ace(),))
+    assert detect_esc3(_estate(templates=(tmpl,))) == []
+
+
+def test_esc3_requires_low_priv_enroll() -> None:
+    tmpl = _template("Agent", ekus=(ENROLLMENT_AGENT,), security=(_enroll_ace(HIGH_PRIV_SID),))
+    assert detect_esc3(_estate(templates=(tmpl,))) == []
+
+
+def test_esc2_esc3_silent_when_template_security_not_collected() -> None:
+    tmpl = _template("Agent", ekus=(ENROLLMENT_AGENT, ANY_PURPOSE), security=(_enroll_ace(),))
+    skipped = _estate(templates=(tmpl,), skipped_passes=("template-security",))
+    assert detect_esc2(skipped) == []
+    assert detect_esc3(skipped) == []
 
 
 # --- ESC4 -----------------------------------------------------------------

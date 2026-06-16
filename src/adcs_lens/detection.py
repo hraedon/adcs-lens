@@ -47,6 +47,9 @@ _PKINIT_CLIENT_AUTH = "1.3.6.1.5.2.3.4"
 _ANY_PURPOSE = "2.5.29.37.0"
 _AUTH_EKUS = frozenset({_CLIENT_AUTH, _SMARTCARD_LOGON, _PKINIT_CLIENT_AUTH, _ANY_PURPOSE})
 
+# Certificate Request Agent EKU (ESC3): the holder can enroll on behalf of others.
+_ENROLLMENT_AGENT_EKU = "1.3.6.1.4.1.311.20.2.1"
+
 # ACE rights (lower-cased) that grant or imply the ability to enroll.
 _ENROLL_RIGHTS = frozenset(
     {"enroll", "autoenroll", "allextendedrights", "genericall", "fullcontrol"}
@@ -205,6 +208,92 @@ def detect_esc1(estate: Estate) -> list[Finding]:
                     "requirement also gates it — not yet modeled.)"
                 ),
                 source=f"template '{tmpl.name}' (oid {tmpl.oid}): name flags + enroll ACL",
+            )
+        )
+    return findings
+
+
+def detect_esc2(estate: Estate) -> list[Finding]:
+    """Flag any-purpose / no-EKU templates enrollable by low-priv principals.
+
+    ESC2: a template defines the Any-Purpose EKU (or no EKU at all) and a
+    low-privilege principal can enroll without manager approval. The issued
+    certificate is valid for *any* use — including client authentication — so a
+    domain user obtains a broadly-usable credential. Statically readable from the
+    EKU list + enroll ACL.
+
+    Returns nothing when template security wasn't collected (ESC1 emits the
+    single degradation note).
+    """
+    if not _template_security_collected(estate):
+        return []
+    findings: list[Finding] = []
+    for tmpl in estate.templates:
+        any_purpose = (not tmpl.ekus) or (_ANY_PURPOSE in tmpl.ekus)
+        if not any_purpose:
+            continue
+        if _MANAGER_APPROVAL in tmpl.enrollment_flags:
+            continue
+        enrollers = _low_priv_enrollers(tmpl)
+        if not enrollers:
+            continue
+        who = ", ".join(sorted({a.trustee_name or a.trustee_sid for a in enrollers}))
+        kind = "no EKU" if not tmpl.ekus else "the Any-Purpose EKU"
+        findings.append(
+            Finding(
+                check="ESC2",
+                severity=Severity.HIGH,
+                title="Any-purpose / no-EKU template enrollable by low-priv",
+                subject=tmpl.display_name or tmpl.name,
+                detail=(
+                    f"Enrollable by {who}; the template defines {kind}, so the issued "
+                    "cert is valid for any purpose (including client authentication). "
+                    "Constrain the EKU set, require manager approval, or restrict "
+                    "enroll rights."
+                ),
+                source=f"template '{tmpl.name}' (oid {tmpl.oid}): EKU list + enroll ACL",
+            )
+        )
+    return findings
+
+
+def detect_esc3(estate: Estate) -> list[Finding]:
+    """Flag enrollment-agent templates enrollable by low-priv principals.
+
+    ESC3: a template carries the Certificate Request Agent EKU and a
+    low-privilege principal can enroll without manager approval. The resulting
+    enrollment-agent certificate lets the holder request certificates *on behalf
+    of other principals* — a path to impersonation. We flag the enabling
+    template; the on-behalf-of request itself is out of scope.
+
+    Returns nothing when template security wasn't collected (ESC1 emits the
+    single degradation note).
+    """
+    if not _template_security_collected(estate):
+        return []
+    findings: list[Finding] = []
+    for tmpl in estate.templates:
+        if _ENROLLMENT_AGENT_EKU not in tmpl.ekus:
+            continue
+        if _MANAGER_APPROVAL in tmpl.enrollment_flags:
+            continue
+        enrollers = _low_priv_enrollers(tmpl)
+        if not enrollers:
+            continue
+        who = ", ".join(sorted({a.trustee_name or a.trustee_sid for a in enrollers}))
+        findings.append(
+            Finding(
+                check="ESC3",
+                severity=Severity.HIGH,
+                title="Enrollment-agent template enrollable by low-priv",
+                subject=tmpl.display_name or tmpl.name,
+                detail=(
+                    f"Enrollable by {who}; the template grants the Certificate Request "
+                    "Agent EKU, so the holder can request certificates on behalf of "
+                    "other principals. Restrict enroll rights or require manager "
+                    "approval."
+                ),
+                source=f"template '{tmpl.name}' (oid {tmpl.oid}): EKU list + enroll ACL",
             )
         )
     return findings
@@ -499,6 +588,8 @@ def run_all(
     """Run every detector and return findings sorted worst-first, then by check."""
     findings = [
         *detect_esc1(estate),
+        *detect_esc2(estate),
+        *detect_esc3(estate),
         *detect_esc4(estate),
         *detect_esc6(estate),
         *detect_esc7(estate),
