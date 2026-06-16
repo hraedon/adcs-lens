@@ -9,10 +9,12 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from adcs_lens.detection import run_all
 from adcs_lens.ingest import ingest
 
-pytestmark = __import__("pytest").mark.certs
+pytestmark = pytest.mark.certs
 
 
 def test_full_export_populates_lifecycle(full_export: Path, now: datetime) -> None:
@@ -31,7 +33,7 @@ def test_full_export_flags_root_crl_and_expiry(full_export: Path, now: datetime)
     # Root CRL is past nextUpdate -> critical, root-tier, no degrade note.
     assert "CRL_EXPIRY" in by_check
     crl = by_check["CRL_EXPIRY"]
-    assert crl.severity == "critical" and crl.tier == "root"
+    assert crl.severity.value == "critical" and crl.tier.value == "root"
     assert "LIFECYCLE_NOT_EVALUATED" not in by_check
 
     # Issuing cert expiring within the default window -> flagged.

@@ -7,13 +7,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Sequence
 
 from adcs_lens import __version__
 from adcs_lens.detection import run_all
 from adcs_lens.display import render_json, render_text
-from adcs_lens.ingest import ingest
+from adcs_lens.ingest import IngestError, ingest
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -39,11 +40,18 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _redact_none(s: str) -> str:
+    return s if s not in ("", "None") else "?"
+
+
 def _cmd_ingest(export_dir: str) -> int:
     estate = ingest(export_dir)
     m = estate.manifest
-    print(f"Ingested export from {m.host or '?'} ({m.domain or '?'})")
-    print(f"  collected: {m.collected_at or 'unknown'}  collector: {m.collector_version}")
+    print(f"Ingested export from {_redact_none(m.host)} ({_redact_none(m.domain)})")
+    print(
+        f"  collected: {_redact_none(m.collected_at)}"
+        f"  collector: {_redact_none(m.collector_version)}"
+    )
     print(f"  CAs: {len(estate.cas)}   templates: {len(estate.templates)}")
     print(f"  PKI ACLs: {len(estate.acls)}   issuance OIDs: {len(estate.oids)}")
     print(f"  CRLs: {len(estate.crls)}   lifecycle evaluated: {m.certs_parsed}")
@@ -58,12 +66,24 @@ def _cmd_doctor(export_dir: str, *, as_json: bool, warn_days: int) -> int:
     return 0
 
 
+def _error(message: str) -> int:
+    print(f"error: {message}", file=sys.stderr)
+    return 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    if args.command == "ingest":
-        return _cmd_ingest(args.export_dir)
-    if args.command == "doctor":
-        return _cmd_doctor(args.export_dir, as_json=args.json, warn_days=args.warn_days)
+    try:
+        if args.command == "ingest":
+            return _cmd_ingest(args.export_dir)
+        if args.command == "doctor":
+            return _cmd_doctor(args.export_dir, as_json=args.json, warn_days=args.warn_days)
+    except IngestError as exc:
+        return _error(str(exc))
+    except json.JSONDecodeError as exc:
+        return _error(f"malformed JSON in export: {exc}")
+    except OSError as exc:
+        return _error(f"cannot read export: {exc}")
     return 2
 
 

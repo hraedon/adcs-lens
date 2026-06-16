@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from adcs_lens.ingest import ingest
+import pytest
+
+from adcs_lens.ingest import IngestError, ingest
+from adcs_lens.model import CaKind, CrlTier, Severity
 from adcs_lens.normalize import is_low_priv_trustee
 
 
@@ -26,9 +29,9 @@ def test_bom_tolerant(json_export: Path) -> None:
 
 def test_ca_flags_and_kind(json_export: Path) -> None:
     estate = ingest(json_export)
-    issuing = next(c for c in estate.cas if c.kind == "issuing")
+    issuing = next(c for c in estate.cas if c.kind == CaKind.ISSUING)
     assert "EDITF_ATTRIBUTESUBJECTALTNAME2" in issuing.edit_flags
-    root = next(c for c in estate.cas if c.kind == "root")
+    root = next(c for c in estate.cas if c.kind == CaKind.ROOT)
     assert root.edit_flags == frozenset()
 
 
@@ -41,13 +44,13 @@ def test_published_by_join(json_export: Path) -> None:
 
 def test_sid_normalized_and_low_priv(json_export: Path) -> None:
     estate = ingest(json_export)
-    issuing = next(c for c in estate.cas if c.kind == "issuing")
+    issuing = next(c for c in estate.cas if c.kind == CaKind.ISSUING)
     ace = issuing.security[0]
     assert ace.trustee_sid.startswith("S-1-5-21-")
     assert is_low_priv_trustee(ace.trustee_sid)
 
 
-def test_certs_parsed_reflects_extra(json_export: Path) -> None:
+def test_certs_parsed_bool_when_no_certs_dir(json_export: Path) -> None:
     # No certs/ dir in the json-only export; certs_parsed mirrors module
     # availability (True when [certs] installed, False otherwise) — never crashes.
     estate = ingest(json_export)
@@ -61,3 +64,46 @@ def test_missing_files_degrade_to_empty(tmp_path: Path) -> None:
     estate = ingest(tmp_path)
     assert estate.cas == ()
     assert estate.templates == ()
+
+
+def test_ca_config_must_be_array(tmp_path: Path) -> None:
+    (tmp_path / "collector-manifest.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "ca-config.json").write_text('{"not": "an array"}', encoding="utf-8")
+    with pytest.raises(IngestError, match="expected a JSON array"):
+        ingest(tmp_path)
+
+
+def test_rejects_directory_traversal(tmp_path: Path) -> None:
+    (tmp_path / "collector-manifest.json").write_text("{}", encoding="utf-8")
+    certs_dir = tmp_path / "certs"
+    certs_dir.mkdir()
+    (certs_dir / "index.json").write_text(
+        '{"certs": [{"file": "../../secret.txt"}]}', encoding="utf-8"
+    )
+    (tmp_path / "secret.txt").write_text("sensitive", encoding="utf-8")
+    with pytest.raises(IngestError, match="escapes certs/"):
+        ingest(tmp_path)
+
+
+def test_null_manifest_fields_coerce_to_empty(tmp_path: Path) -> None:
+    (tmp_path / "collector-manifest.json").write_text(
+        '{"host": null, "domain": null}', encoding="utf-8"
+    )
+    m = ingest(tmp_path).manifest
+    assert m.host == ""
+    assert m.domain == ""
+
+
+def test_full_export_lifecycle(full_export: Path) -> None:
+    estate = ingest(full_export)
+    assert estate.manifest.certs_parsed is True
+    assert len(estate.crls) == 2
+    assert any(c.tier == CrlTier.ROOT for c in estate.crls)
+    assert any(c.tier == CrlTier.ISSUING for c in estate.crls)
+
+
+def test_severity_enum_round_trips(json_export: Path) -> None:
+    from adcs_lens.detection import run_all
+    findings = run_all(ingest(json_export))
+    esc6 = next(f for f in findings if f.check == "ESC6")
+    assert esc6.severity == Severity.CRITICAL

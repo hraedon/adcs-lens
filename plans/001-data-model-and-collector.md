@@ -3,28 +3,28 @@
 **Status:** Phases 0, 2, 3 **built 2026-06-15** (package + CI on 3.12/3.13,
 model, ingest, ESC6 + infra cert/CRL-expiry detectors, `doctor` CLI, synthetic
 fixtures, architecture guard — all gates green). **Phase 1 (the read-only
-PowerShell collector) is the remaining work** — it needs lab calibration on
-`LABCA01`; the fixture generator stands in until then. (proposed 2026-06-13)
+PowerShell collector, `scripts/Export-AdcsEstate.ps1`) built 2026-06-16** and
+calibrated against a representative lab issuing CA; the fixture generator remains
+the offline stand-in for tests. (proposed 2026-06-13)
 **Author:** Opus 4.8 (charter + threat-model derivation)
-**Strategic role:** adcs-lens is charter-stage — `README.md`, `AGENTS.md`, and
-`docs/threat-model.md` exist; there is no code. This plan turns the threat
-model's detectability table into the two things every later detector depends on:
-a **faithful read-only collector** and a **normalized data model** validated
-against a real CA export. The lesson from gpo-lens is explicit here — *model
-first, validate against reality, then detect.* The detectors are easy once the
-export is trustworthy; the export is the hard part.
+**Strategic role:** The deterministic core (`model`, `normalize`, `ingest`,
+`detection`, `display`, `cli`) is built and tested; this plan now tracks the
+remaining work, especially the read-only PowerShell collector. The threat
+model's detectability table has been turned into a normalized data model and
+enough detectors to prove it end-to-end. *Model first, validate against reality,
+then detect* — the export remains the critical path.
 
 ## Ground truth at time of writing
 
-- No `pyproject.toml`, no package, no git, no CI. The project exists as three
-  Markdown files under `/projects/adcs-lens/`.
+- `pyproject.toml`, `src/adcs_lens/`, tests, CI, and the package skeleton are
+  built and green on Python 3.12/3.13.
 - `docs/threat-model.md` is the contract: it enumerates every check and, per
   check, what a read-only export can detect statically. **The collector must
   capture exactly what that table's "data source" column names — and nothing
   that requires enrolling, requesting, or relaying.**
 - A real CA export does not yet exist. Phase 1's collector produces the first
   one; it goes in a gitignored `samples/` and is never committed (the gpo-lens
-  work-domain leak is the cautionary tale — see WI-0.4 below).
+  work-domain leak is the cautionary tale — see WI-0.4 and `AGENTS.md`).
 
 ## Principles this plan must hold
 
@@ -32,9 +32,10 @@ export is trustworthy; the export is the hard part.
   AD CS PowerShell module, and LDAP reads of the Configuration NC. It never
   authenticates as an enrollee, never requests a cert, never touches an
   enrollment endpoint.
-- **Deterministic, stdlib-only core.** `model`, `normalize`, `ingest`, `store`,
-  `detection`, `display` import only the standard library. Narration/web are
-  later, optional, and import the core — never the reverse.
+- **Deterministic, stdlib-only core.** `model`, `normalize`, `ingest`,
+  `detection`, `display`, and the `cli` front door import only the standard
+  library. Narration/web are later, optional, and import the core — never the
+  reverse.
 - **Provenance in the export.** Every collection writes a manifest recording
   collector version, timestamp, host, domain, and *which gated passes were
   skipped*, so a finding can always be traced to what was (and wasn't) read.
@@ -51,8 +52,9 @@ Copy the *proven patterns* from cert-watch/gpo-lens, not their file trees
   `[certs]` (cert/CRL parsing — see WI-2.2), `[narration]` (the LLM client,
   later), `[web]` (FastAPI, later). Console script
   `adcs-lens = adcs_lens.cli:main`.
-- `src/adcs_lens/` with empty-but-typed `model.py`, `normalize.py`,
-  `ingest.py`, `store.py`, `detection.py`, `display.py`, `cli/`.
+- `src/adcs_lens/` with `model.py`, `normalize.py`, `ingest.py`,
+  `detection.py`, `display.py`, `cli.py`. A separate `store` persistence layer
+  is not implemented in this phase; the model is held in memory.
 - **AC:** `uv pip install -e ".[dev]"`, `ruff check .`, `mypy src` all clean on
   the skeleton.
 
@@ -75,11 +77,11 @@ Copy the *proven patterns* from cert-watch/gpo-lens, not their file trees
   `.gitignore` survives a fresh clone.
 
 ### WI-0.4 — Sanitization rule (written, before any public flip)
-- The export contains CA names, template names, OIDs, SIDs, domain. Decide in
-  writing (`docs/publication-review.md`) what may appear in committed
-  files (ranges/placeholders only) before the repo goes public. Add the rule to
-  `AGENTS.md`.
-- **AC:** decision note exists; no real CA/domain identifiers in any committed
+- The export contains CA names, template names, OIDs, SIDs, domain. Write the
+  rule into `AGENTS.md`: committed files may contain only placeholders and
+  synthetic identifiers (`lab.example.com`, `LABCA01`, etc.). No real
+  work-domain names in committed source, docs, tests, plans, or fixtures.
+- **AC:** rule is in `AGENTS.md`; no real CA/domain identifiers in any committed
   file.
 
 ---
@@ -209,12 +211,13 @@ the real export (Phase 1 AC) becomes a calibration check rather than a blocker.
 1. **Cert-parsing dependency** (WI-2.2) — **Resolved 2026-06-13:** core stays
    stdlib-only; cert/CRL parsing is an optional `[certs]` extra that degrades to
    "lifecycle not evaluated," exit 0.
-2. **Lab CA** — **Resolved 2026-06-13:** `lab.example.com` lab has a two-tier
-   PKI — a separate offline root (kept offline) + online issuing CA `LABCA01`
-   (OCSP working; Web Enrollment `/certsrv/` not yet installed but installable).
-   The Phase 1 collector targets `LABCA01`; the root cert + root CRL come from
-   published locations (see the two-tier note in Phase 1). First real export and
-   the root-CRL-expiry case both calibrate here. (`LABWAC01` was the CA earlier
-   but the role moved to `LABCA01`; LABWAC01 now runs WAC.)
+2. **Lab CA** — **Resolved 2026-06-13:** a representative lab has a two-tier
+   PKI under a placeholder domain (`lab.example.com`) — a separate offline
+   root (kept offline) + online issuing CA `LABCA01` (OCSP working; Web
+   Enrollment `/certsrv/` not yet installed but installable).
+    The Phase 1 collector targets the online issuing CA (`LABCA01` in the lab
+    naming convention); the root cert + root CRL come from published locations
+    (see the two-tier note in Phase 1). First real export and the root-CRL-expiry
+    case both calibrate there.
 3. **Repo visibility** (still open) — recommend private now, public only after
    WI-0.4's sanitization review, mirroring the corrected gpo-lens posture.

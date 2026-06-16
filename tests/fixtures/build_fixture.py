@@ -8,10 +8,6 @@ hard rule).
 The export models the two-tier SMB case the charter targets: an offline root CA
 plus an online issuing CA, with one ESC6-positive CA and a root CRL that is past
 its nextUpdate (the catastrophic-but-invisible case).
-
-``build_export(out_dir)`` writes the stdlib-readable JSON files. When
-``with_certs=True`` it also writes DER certs/CRLs (needs ``cryptography``) so the
-lifecycle path can be exercised end-to-end.
 """
 
 from __future__ import annotations
@@ -157,12 +153,18 @@ def _write_certs(base: Path, *, now: datetime) -> None:
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives.serialization import Encoding
     from cryptography.x509.oid import NameOID
 
+    _DER = Encoding.DER
     certs_dir = base / "certs"
     certs_dir.mkdir(parents=True, exist_ok=True)
 
-    def _self_signed(cn: str, not_before: datetime, not_after: datetime) -> tuple[Any, Any]:
+    def _self_signed(
+        cn: str,
+        not_before: datetime,
+        not_after: datetime,
+    ) -> tuple[x509.Certificate, rsa.RSAPrivateKey]:
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
         cert = (
@@ -181,9 +183,11 @@ def _write_certs(base: Path, *, now: datetime) -> None:
     root_cert, root_key = _self_signed(
         ROOT_CA, now - timedelta(days=3650), now + timedelta(days=3650)
     )
-    iss_cert, _ = _self_signed(ISSUING_CA, now - timedelta(days=1700), now + timedelta(days=30))
-    (certs_dir / "root.cer").write_bytes(root_cert.public_bytes(_encoding_der()))
-    (certs_dir / "issuing.cer").write_bytes(iss_cert.public_bytes(_encoding_der()))
+    iss_cert, iss_key = _self_signed(
+        ISSUING_CA, now - timedelta(days=1700), now + timedelta(days=30)
+    )
+    (certs_dir / "root.cer").write_bytes(root_cert.public_bytes(_DER))
+    (certs_dir / "issuing.cer").write_bytes(iss_cert.public_bytes(_DER))
 
     # Root CRL: past nextUpdate (the silent estate-wide failure). Issuing CRL: fresh.
     root_crl = (
@@ -198,10 +202,10 @@ def _write_certs(base: Path, *, now: datetime) -> None:
         .issuer_name(iss_cert.subject)
         .last_update(now - timedelta(days=2))
         .next_update(now + timedelta(days=5))
-        .sign(root_key, hashes.SHA256())
+        .sign(iss_key, hashes.SHA256())  # signed by the issuing CA, not the root
     )
-    (certs_dir / "root.crl").write_bytes(root_crl.public_bytes(_encoding_der()))
-    (certs_dir / "issuing.crl").write_bytes(iss_crl.public_bytes(_encoding_der()))
+    (certs_dir / "root.crl").write_bytes(root_crl.public_bytes(_DER))
+    (certs_dir / "issuing.crl").write_bytes(iss_crl.public_bytes(_DER))
 
     _write_json(
         certs_dir / "index.json",
@@ -211,23 +215,27 @@ def _write_certs(base: Path, *, now: datetime) -> None:
                 {"file": "issuing.cer", "ca_name": ISSUING_CA, "kind": "issuing_ca"},
             ],
             "crls": [
-                {"file": "root.crl", "issuer": ROOT_CA, "tier": "root",
-                 "source": "published: AD AIA container (root is offline)"},
-                {"file": "issuing.crl", "issuer": ISSUING_CA, "tier": "issuing",
-                 "source": "host: LABCA01"},
+                {
+                    "file": "root.crl",
+                    "issuer": ROOT_CA,
+                    "tier": "root",
+                    "source": "published: AD AIA container (root is offline)",
+                },
+                {
+                    "file": "issuing.crl",
+                    "issuer": ISSUING_CA,
+                    "tier": "issuing",
+                    "source": "host: LABCA01",
+                },
             ],
         },
     )
 
 
-def _encoding_der() -> Any:
-    from cryptography.hazmat.primitives.serialization import Encoding
-
-    return Encoding.DER
-
-
 if __name__ == "__main__":  # manual generation for inspection
     import sys
 
-    out = build_export(sys.argv[1] if len(sys.argv) > 1 else "./synthetic-export", with_certs=True)
+    out = build_export(
+        sys.argv[1] if len(sys.argv) > 1 else "./synthetic-export", with_certs=True
+    )
     print(f"wrote synthetic export to {out}")

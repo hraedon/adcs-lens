@@ -6,9 +6,7 @@ This is the *only* module permitted to import a third-party dependency
 air-gappable; when the extra is absent, lifecycle fields are ``None`` and the
 lifecycle detector degrades to a note.
 
-Nothing here makes a network call — it parses bytes already on disk. "Flag,
-don't probe" holds: no CDP/AIA URL is fetched (reachability is judged from
-declared config only).
+Nothing here makes a network call — it parses bytes already on disk.
 """
 
 from __future__ import annotations
@@ -17,7 +15,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import dsa, ec, rsa
 
-from adcs_lens.model import CertLifecycle, Crl
+from adcs_lens.model import CertKind, CertLifecycle, Crl, CrlTier
 
 
 def _key_bits(cert: x509.Certificate) -> int | None:
@@ -35,7 +33,7 @@ def _sig_alg(cert: x509.Certificate) -> str:
     return name.lower()
 
 
-def parse_cert(der: bytes, *, kind: str) -> CertLifecycle:
+def parse_cert(der: bytes, *, kind: CertKind) -> CertLifecycle:
     """Parse a DER certificate into :class:`CertLifecycle`."""
     cert = x509.load_der_x509_certificate(der)
     return CertLifecycle(
@@ -48,7 +46,7 @@ def parse_cert(der: bytes, *, kind: str) -> CertLifecycle:
     )
 
 
-def parse_crl(der: bytes, *, tier: str, source: str) -> Crl:
+def parse_crl(der: bytes, *, tier: CrlTier, source: str) -> Crl:
     """Parse a DER CRL into :class:`Crl`."""
     crl = x509.load_der_x509_crl(der)
     return Crl(

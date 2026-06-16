@@ -15,16 +15,68 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
+
+
+class Severity(StrEnum):
+    """Finding severity, ordered from worst to least."""
+
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    INFO = "info"
+
+
+class AceType(StrEnum):
+    """Access-control entry type."""
+
+    ALLOW = "Allow"
+    DENY = "Deny"
+
+
+class CaKind(StrEnum):
+    """Classification of a certification authority."""
+
+    ROOT = "root"
+    ISSUING = "issuing"
+    STANDALONE = "standalone"
+
+
+class CertKind(StrEnum):
+    """Classification of a parsed certificate's role."""
+
+    ROOT_CA = "root_ca"
+    ISSUING_CA = "issuing_ca"
+    CROSS_CA = "cross_ca"
+    OTHER = "other"
+
+
+class CrlTier(StrEnum):
+    """Classification of a CRL by which CA tier it serves."""
+
+    ROOT = "root"
+    ISSUING = "issuing"
+
+
+class AclKind(StrEnum):
+    """Classification of a PKI object that carries a security descriptor."""
+
+    NTAUTH = "ntauth"
+    AIA = "aia"
+    CDP = "cdp"
+    PKS_CONTAINER = "pks_container"
+    CA_OBJECT = "ca_object"
 
 
 @dataclass(frozen=True)
 class AceEntry:
-    """One access-control entry on a PKI object (shared concept with gpo-lens)."""
+    """One access-control entry on a PKI object."""
 
     trustee_sid: str
     trustee_name: str
     rights: tuple[str, ...]
-    ace_type: str  # "Allow" | "Deny"
+    ace_type: AceType
 
 
 @dataclass(frozen=True)
@@ -32,7 +84,7 @@ class CertLifecycle:
     """Lifecycle facts parsed from a CA/sub-CA certificate (``[certs]`` path)."""
 
     subject: str
-    kind: str  # "root_ca" | "issuing_ca" | "cross_ca" | "other"
+    kind: CertKind
     not_before: datetime | None
     not_after: datetime | None
     sig_alg: str
@@ -46,7 +98,7 @@ class Crl:
     issuer: str
     this_update: datetime | None
     next_update: datetime | None
-    tier: str  # "root" | "issuing"
+    tier: CrlTier
     source: str  # where it was captured (published CDP, AD container, host)
 
 
@@ -57,7 +109,7 @@ class CertAuthority:
     name: str
     dns: str
     config_string: str
-    kind: str  # "root" | "issuing" | "standalone"
+    kind: CaKind
     edit_flags: frozenset[str]
     interface_flags: frozenset[str]
     audit_filter: int | None
@@ -89,7 +141,7 @@ class PkiObjectAcl:
     """A security descriptor on a Public Key Services object/container."""
 
     object_dn: str
-    kind: str  # "ntauth" | "aia" | "cdp" | "pks_container" | "ca_object"
+    kind: AclKind
     security: tuple[AceEntry, ...]
 
 

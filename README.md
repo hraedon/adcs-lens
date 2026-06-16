@@ -101,7 +101,8 @@ scripts/Export-AdcsEstate.ps1 -OutputDir C:\AdcsExport
 ```bash
 # Copy the export to your analysis machine, then:
 adcs-lens ingest C:\AdcsExport
-adcs-lens doctor            # prioritized posture + lifecycle findings
+adcs-lens doctor C:\AdcsExport            # prioritized posture + lifecycle findings
+adcs-lens doctor C:\AdcsExport --json     # stable JSON envelope
 ```
 
 > Status: the deterministic core is built and tested (ingest → `doctor`, with

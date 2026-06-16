@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-# Make the declarative fixture generator importable.
-sys.path.insert(0, str(Path(__file__).parent / "fixtures"))
-from build_fixture import build_export  # noqa: E402
+from tests.fixtures.build_fixture import build_export
 
 # A fixed "now" so expiry/CRL assertions are deterministic regardless of
 # wall-clock at test time. The synthetic export's validity windows are anchored

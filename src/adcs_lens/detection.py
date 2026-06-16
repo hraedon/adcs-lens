@@ -12,16 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from adcs_lens.model import Estate
-
-# Severity ordering for stable, worst-first reporting.
-SEVERITY_ORDER: dict[str, int] = {
-    "critical": 0,
-    "high": 1,
-    "medium": 2,
-    "low": 3,
-    "info": 4,
-}
+from adcs_lens.model import CertKind, Crl, CrlTier, Estate, Severity
 
 # ESC6: requester-supplied SAN honored CA-wide regardless of template.
 _EDITF_SAN2 = "EDITF_ATTRIBUTESUBJECTALTNAME2"
@@ -32,12 +23,12 @@ class Finding:
     """One posture finding, traceable to a source fact."""
 
     check: str  # "ESC6", "CA_CERT_EXPIRY", "CRL_EXPIRY", ...
-    severity: str  # critical | high | medium | low | info
+    severity: Severity
     title: str
     subject: str  # the CA / template / object the finding is about
     detail: str
     source: str  # the exact source fact (registry path, cert file, CRL, ...)
-    tier: str | None = None  # "root" | "issuing" for lifecycle findings
+    tier: CrlTier | None = None  # root | issuing for lifecycle findings
 
 
 def detect_esc6(estate: Estate) -> list[Finding]:
@@ -54,7 +45,7 @@ def detect_esc6(estate: Estate) -> list[Finding]:
             findings.append(
                 Finding(
                     check="ESC6",
-                    severity="critical",
+                    severity=Severity.CRITICAL,
                     title="CA honors requester-supplied SAN (EDITF_ATTRIBUTESUBJECTALTNAME2)",
                     subject=ca.name,
                     detail=(
@@ -88,12 +79,14 @@ def detect_infra_cert_expiry(
     """
     if now is None:
         now = datetime.now(UTC)
+    elif now.tzinfo is None:
+        raise ValueError("'now' must be timezone-aware (prefer UTC)")
 
     if not estate.manifest.certs_parsed:
         return [
             Finding(
                 check="LIFECYCLE_NOT_EVALUATED",
-                severity="info",
+                severity=Severity.INFO,
                 title="Certificate lifecycle not evaluated",
                 subject="(estate)",
                 detail=(
@@ -120,46 +113,28 @@ def detect_infra_cert_expiry(
     for crl in estate.crls:
         if crl.next_update is None:
             continue
-        if crl.next_update < now:
-            root = crl.tier == "root"
-            findings.append(
-                Finding(
-                    check="CRL_EXPIRY",
-                    severity="critical",
-                    title="Published CRL is past nextUpdate (chain validation fails)",
-                    subject=crl.issuer,
-                    detail=(
-                        "Clients that fetch this CRL will treat the chain as invalid"
-                        + (
-                            " — and because the root CRL signer is offline, nobody is "
-                            "watching it expire (silent estate-wide auth failure)."
-                            if root
-                            else "."
-                        )
-                    ),
-                    source=f"CRL nextUpdate {crl.next_update.isoformat()} ({crl.source})",
-                    tier=crl.tier,
-                )
-            )
+        findings.extend(
+            _crl_finding(crl, now, warn_days)
+        )
     return findings
 
 
 def _expiry_finding(
     ca_name: str,
     subject: str,
-    kind: str,
+    kind: CertKind,
     not_after: datetime,
     now: datetime,
     warn_days: int,
 ) -> list[Finding]:
     days = (not_after - now).days
-    root = kind == "root_ca"
+    root = kind == CertKind.ROOT_CA
     if not_after < now:
-        severity = "critical"
+        severity = Severity.CRITICAL
         title = "CA certificate has expired"
     elif days <= warn_days:
         # A failing root invalidates the whole estate, so escalate it.
-        severity = "critical" if root else "high"
+        severity = Severity.CRITICAL if root else Severity.HIGH
         title = f"CA certificate expires in {days} day(s)"
     else:
         return []
@@ -170,13 +145,49 @@ def _expiry_finding(
             title=title,
             subject=subject or ca_name,
             detail=(
-                f"{kind} certificate not_after={not_after.isoformat()}"
+                f"{kind.value} certificate not_after={not_after.isoformat()}"
                 + (" — root tier: failure cascades to the entire chain." if root else ".")
             ),
             source=f"CA cert for {ca_name}",
-            tier="root" if root else "issuing",
+            tier=CrlTier.ROOT if root else CrlTier.ISSUING,
         )
     ]
+
+
+def _crl_finding(crl: Crl, now: datetime, warn_days: int) -> list[Finding]:
+    """Return CRL freshness findings.
+
+    CRLs are typically short-lived (days or weeks), so we flag only expired CRLs
+    here rather than applying the cert-style ``warn_days`` window, which would be
+    excessively noisy for a 7-day CRL. An explicit early-warning window for CRLs
+    can be added later when the model carries CRL validity-period policy.
+    """
+    del warn_days  # reserved for future CRL validity-policy check
+    next_update = crl.next_update
+    if next_update is None:
+        return []
+    root = crl.tier == CrlTier.ROOT
+    if next_update < now:
+        return [
+            Finding(
+                check="CRL_EXPIRY",
+                severity=Severity.CRITICAL,
+                title="Published CRL is past nextUpdate (chain validation fails)",
+                subject=crl.issuer,
+                detail=(
+                    "Clients that fetch this CRL will treat the chain as invalid"
+                    + (
+                        " — and because the root CRL signer is offline, nobody is "
+                        "watching it expire (silent estate-wide auth failure)."
+                        if root
+                        else "."
+                    )
+                ),
+                source=f"CRL nextUpdate {next_update.isoformat()} ({crl.source})",
+                tier=crl.tier,
+            )
+        ]
+    return []
 
 
 def run_all(
@@ -190,5 +201,5 @@ def run_all(
         *detect_esc6(estate),
         *detect_infra_cert_expiry(estate, now=now, warn_days=warn_days),
     ]
-    findings.sort(key=lambda f: (SEVERITY_ORDER.get(f.severity, 99), f.check, f.subject))
+    findings.sort(key=lambda f: (f.severity, f.check, f.subject))
     return findings

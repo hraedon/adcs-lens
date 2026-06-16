@@ -4,25 +4,41 @@ version = "0.1.0"
 description = "Local-first, read-only AD CS / PKI posture analysis"
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "MIT" }
+license = { file = "LICENSE" }
 authors = [{ name = "hraedon" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+]
 # The deterministic core is stdlib-only by charter (portable, air-gappable).
 dependencies = []
 
 [project.optional-dependencies]
+# Pins include upper bounds to keep CI reproducible against future major versions.
 dev = [
-    "pytest>=8.3",
-    "ruff>=0.7",
-    "mypy>=1.13",
+    "pytest>=8.3,<9",
+    "ruff>=0.7,<1",
+    "mypy>=1.13,<2",
 ]
 # Cert/CRL (DER) parsing for the lifecycle path. The core never imports this;
 # when absent, lifecycle fields are None and lifecycle checks degrade to a note.
 certs = [
-    "cryptography>=43",
+    "cryptography>=43,<45",
 ]
-# Optional layers, later plans — kept out of the truth path.
+# Optional layers, kept out of the truth path. They are currently empty
+# placeholders; see future plans. Installing them succeeds but adds nothing.
 narration = []
 web = []
+
+[project.urls]
+Source = "https://github.com/hraedon/adcs-lens"
+Issues = "https://github.com/hraedon/adcs-lens/issues"
 
 [project.scripts]
 adcs-lens = "adcs_lens.cli:main"

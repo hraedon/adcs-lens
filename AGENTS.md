@@ -79,5 +79,6 @@ exports (WI-001), never from a standing connection.
 
 ## Status
 
-Charter / pre-code. The next step is a plan that turns `docs/threat-model.md`
-into a normalized data model + the collector, then the deterministic detectors.
+The deterministic core is built and tested (ingest → `doctor`, ESC6 + infra
+lifecycle detectors, architecture guard). The read-only PowerShell collector
+(`scripts/Export-AdcsEstate.ps1`) and the full ESC suite are pending.
