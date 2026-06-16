@@ -17,9 +17,12 @@ from __future__ import annotations
 _ABSOLUTE_LOW_PRIV: frozenset[str] = frozenset(
     {
         "S-1-1-0",  # Everyone
+        "S-1-5-2",  # Network (any network-authenticated principal)
+        "S-1-5-4",  # Interactive (any interactively-logged-on principal)
         "S-1-5-7",  # Anonymous Logon
         "S-1-5-11",  # Authenticated Users
         "S-1-5-32-545",  # BUILTIN\Users
+        "S-1-5-32-546",  # BUILTIN\Guests
     }
 )
 _DOMAIN_LOW_PRIV_RIDS: frozenset[str] = frozenset(
