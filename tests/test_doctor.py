@@ -19,6 +19,8 @@ def test_doctor_json_flags_esc6(json_export: Path, capsys: pytest.CaptureFixture
     assert envelope["schema_version"] == 1
     checks = {f["check"] for f in envelope["findings"]}
     assert "ESC6" in checks
+    # The fixture template sets NO_SECURITY_EXTENSION -> ESC9 surfaces end-to-end.
+    assert "ESC9" in checks
     esc6 = next(f for f in envelope["findings"] if f["check"] == "ESC6")
     assert esc6["severity"] == Severity.CRITICAL.value
 

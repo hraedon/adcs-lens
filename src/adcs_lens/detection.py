@@ -1,10 +1,11 @@
 """Deterministic detectors. No AI, no I/O, no probing — pure functions over an
 :class:`~adcs_lens.model.Estate`.
 
-This first slice carries two checks that exercise both data paths end-to-end
-(Plan 001 Phase 3): ESC6 on the config path and infrastructure cert/CRL expiry
-on the lifecycle path. Each finding is traceable to the exact source fact, per
-the charter's "evidence-producing" principle.
+The checks here span both data paths: ESC1 / ESC6 / ESC9 on the config/template
+path and infrastructure cert/CRL expiry on the lifecycle path. Each finding is
+traceable to the exact source fact, per the charter's "evidence-producing"
+principle, and ACL-dependent checks degrade to a note rather than a false
+"all clear" when the collector did not capture the relevant security descriptors.
 """
 
 from __future__ import annotations
@@ -12,10 +13,49 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from adcs_lens.model import CertKind, Crl, CrlTier, Estate, Severity
+from adcs_lens.model import (
+    AceEntry,
+    AceType,
+    CertKind,
+    CertTemplate,
+    Crl,
+    CrlTier,
+    Estate,
+    Severity,
+)
+from adcs_lens.normalize import is_low_priv_trustee
 
 # ESC6: requester-supplied SAN honored CA-wide regardless of template.
 _EDITF_SAN2 = "EDITF_ATTRIBUTESUBJECTALTNAME2"
+
+# --- ESC1 / ESC9: template-driven enrollment escalation ----------------------
+# Name flags that let the *requester* choose the subject/SAN, so they can name a
+# privileged principal. Either form qualifies (collector emits the MS names).
+_ENROLLEE_SUPPLIES_SUBJECT = frozenset(
+    {"ENROLLEE_SUPPLIES_SUBJECT", "ENROLLEE_SUPPLIES_SUBJECT_ALT_NAME"}
+)
+# Enrollment flag that gates issuance behind a CA manager — mitigates ESC1.
+_MANAGER_APPROVAL = "PEND_ALL_REQUESTS"
+# Enrollment flag behind ESC9 (issued cert omits szOID_NTDS_CA_SECURITY_EXT).
+_NO_SECURITY_EXTENSION = "NO_SECURITY_EXTENSION"
+
+# EKUs whose presence lets the issued cert authenticate as its subject. A
+# template with *no* EKU is equally dangerous (valid for any purpose).
+_CLIENT_AUTH = "1.3.6.1.5.5.7.3.2"
+_SMARTCARD_LOGON = "1.3.6.1.4.1.311.20.2.2"
+_PKINIT_CLIENT_AUTH = "1.3.6.1.5.2.3.4"
+_ANY_PURPOSE = "2.5.29.37.0"
+_AUTH_EKUS = frozenset({_CLIENT_AUTH, _SMARTCARD_LOGON, _PKINIT_CLIENT_AUTH, _ANY_PURPOSE})
+
+# ACE rights (lower-cased) that grant or imply the ability to enroll.
+_ENROLL_RIGHTS = frozenset(
+    {"enroll", "autoenroll", "allextendedrights", "genericall", "fullcontrol"}
+)
+
+# Manifest pass whose absence means template ACLs were not collected (collector
+# Phase 1b). ESC checks needing the enroll ACL degrade to a note when it is
+# listed in skipped_passes.
+_TEMPLATE_SECURITY_PASS = "template-security"
 
 
 @dataclass(frozen=True)
@@ -56,6 +96,126 @@ def detect_esc6(estate: Estate) -> list[Finding]:
                         "restart certsvc."
                     ),
                     source=f"{ca.config_string} policy\\EditFlags",
+                )
+            )
+    return findings
+
+
+def _can_authenticate(template: CertTemplate) -> bool:
+    """True if the template's EKUs permit client authentication.
+
+    A template with no EKU at all is valid for any purpose, so it qualifies too.
+    """
+    if not template.ekus:
+        return True
+    return any(eku in _AUTH_EKUS for eku in template.ekus)
+
+
+def _low_priv_enrollers(template: CertTemplate) -> list[AceEntry]:
+    """Allow-ACEs that grant (or imply) enroll to a low-privilege trustee."""
+    out: list[AceEntry] = []
+    for ace in template.security:
+        if ace.ace_type is not AceType.ALLOW:
+            continue
+        if not is_low_priv_trustee(ace.trustee_sid):
+            continue
+        if any(r.strip().lower() in _ENROLL_RIGHTS for r in ace.rights):
+            out.append(ace)
+    return out
+
+
+def _template_security_collected(estate: Estate) -> bool:
+    return _TEMPLATE_SECURITY_PASS not in estate.manifest.skipped_passes
+
+
+def detect_esc1(estate: Estate) -> list[Finding]:
+    """Flag templates that let a low-priv user enroll a cert naming any subject.
+
+    ESC1 holds when a template (a) lets the requester supply the subject/SAN,
+    (b) carries a client-authentication EKU (or no EKU), (c) does not require CA
+    manager approval, and (d) is enrollable by a low-privilege principal. A
+    domain user can then request a certificate *as* a domain admin and
+    authenticate as them. Every condition is statically readable; we never
+    enroll.
+
+    Degrades honestly: when template security descriptors were not collected
+    (collector Phase 1b — ``template-security`` in ``skipped_passes``) the enroll
+    ACL cannot be evaluated, so this emits one INFO note instead of silently
+    passing.
+    """
+    if not _template_security_collected(estate):
+        return [
+            Finding(
+                check="TEMPLATE_ACL_NOT_EVALUATED",
+                severity=Severity.INFO,
+                title="Template enroll permissions not evaluated",
+                subject="(estate)",
+                detail=(
+                    "The export did not include template security descriptors, so "
+                    "ESC1 enroll-permission checks were skipped. Re-run a collector "
+                    "that captures template nTSecurityDescriptor ACEs (Phase 1b)."
+                ),
+                source="collector-manifest.json: skipped_passes contains 'template-security'",
+            )
+        ]
+    findings: list[Finding] = []
+    for tmpl in estate.templates:
+        if not (tmpl.name_flags & _ENROLLEE_SUPPLIES_SUBJECT):
+            continue
+        if not _can_authenticate(tmpl):
+            continue
+        if _MANAGER_APPROVAL in tmpl.enrollment_flags:
+            continue
+        enrollers = _low_priv_enrollers(tmpl)
+        if not enrollers:
+            continue
+        who = ", ".join(sorted({a.trustee_name or a.trustee_sid for a in enrollers}))
+        findings.append(
+            Finding(
+                check="ESC1",
+                severity=Severity.CRITICAL,
+                title="Template lets a low-priv enrollee supply subject + authenticate",
+                subject=tmpl.display_name or tmpl.name,
+                detail=(
+                    f"Enrollable by {who}; the requester supplies the subject/SAN and "
+                    "the template carries a client-authentication EKU (or none) with no "
+                    "manager approval — a domain user can enroll as any principal. "
+                    "Restrict enroll rights, require manager approval, or clear the "
+                    "enrollee-supplies-subject flag. (Confirm no issuance/RA-signature "
+                    "requirement also gates it — not yet modeled.)"
+                ),
+                source=f"template '{tmpl.name}' (oid {tmpl.oid}): name flags + enroll ACL",
+            )
+        )
+    return findings
+
+
+def detect_esc9(estate: Estate) -> list[Finding]:
+    """Flag templates with CT_FLAG_NO_SECURITY_EXTENSION set.
+
+    ESC9: certificates issued from the template omit the SID security extension,
+    so on a DC where ``StrongCertificateBindingEnforcement`` is not enforcing the
+    cert can be mapped to a different (higher-privilege) account. We flag the
+    enabling template flag; the mapping/relay itself is out of scope. Readable
+    from the template enrollment flags with no ACL dependency, so it evaluates on
+    every export (unlike ESC1).
+    """
+    findings: list[Finding] = []
+    for tmpl in estate.templates:
+        if _NO_SECURITY_EXTENSION in tmpl.enrollment_flags:
+            findings.append(
+                Finding(
+                    check="ESC9",
+                    severity=Severity.HIGH,
+                    title="Template omits the SID security extension (NO_SECURITY_EXTENSION)",
+                    subject=tmpl.display_name or tmpl.name,
+                    detail=(
+                        "Certificates from this template lack szOID_NTDS_CA_SECURITY_EXT. "
+                        "Where DC StrongCertificateBindingEnforcement is not enforcing, the "
+                        "cert can be mapped to another account. Clear the flag unless a "
+                        "specific mapping scenario requires it."
+                    ),
+                    source=f"template '{tmpl.name}': msPKI-Enrollment-Flag",
                 )
             )
     return findings
@@ -198,7 +358,9 @@ def run_all(
 ) -> list[Finding]:
     """Run every detector and return findings sorted worst-first, then by check."""
     findings = [
+        *detect_esc1(estate),
         *detect_esc6(estate),
+        *detect_esc9(estate),
         *detect_infra_cert_expiry(estate, now=now, warn_days=warn_days),
     ]
     findings.sort(key=lambda f: (f.severity, f.check, f.subject))

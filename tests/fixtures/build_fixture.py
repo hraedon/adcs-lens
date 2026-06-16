@@ -107,9 +107,10 @@ def build_export(
                 "display_name": "Lab Web Server",
                 "schema_version": 2,
                 "oid": TEMPLATE_OID,
-                "ekus": ["1.3.6.1.5.5.7.3.1"],  # Server Auth
+                "ekus": ["1.3.6.1.5.5.7.3.1"],  # Server Auth (not client auth -> not ESC1)
                 "name_flags": ["ENROLLEE_SUPPLIES_SUBJECT"],
-                "enrollment_flags": [],
+                # ESC9 enabling flag: issued certs omit the SID security extension.
+                "enrollment_flags": ["NO_SECURITY_EXTENSION"],
                 "min_key_size": 2048,
                 "issuance_policy_oids": [POLICY_OID],
                 "security": [],

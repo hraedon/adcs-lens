@@ -4,12 +4,21 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from adcs_lens.detection import detect_esc6, detect_infra_cert_expiry, run_all
+from adcs_lens.detection import (
+    detect_esc1,
+    detect_esc6,
+    detect_esc9,
+    detect_infra_cert_expiry,
+    run_all,
+)
 from adcs_lens.model import (
+    AceEntry,
+    AceType,
     CaKind,
     CertAuthority,
     CertKind,
     CertLifecycle,
+    CertTemplate,
     Crl,
     CrlTier,
     Estate,
@@ -18,6 +27,40 @@ from adcs_lens.model import (
 )
 
 NOW = datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC)
+
+CLIENT_AUTH = "1.3.6.1.5.5.7.3.2"
+SERVER_AUTH = "1.3.6.1.5.5.7.3.1"
+LOW_PRIV_SID = "S-1-5-21-1111111111-2222222222-3333333333-513"  # Domain Users
+HIGH_PRIV_SID = "S-1-5-21-1111111111-2222222222-3333333333-512"  # Domain Admins
+
+
+def _enroll_ace(sid: str = LOW_PRIV_SID, *, right: str = "Enroll") -> AceEntry:
+    return AceEntry(
+        trustee_sid=sid, trustee_name="trustee", rights=(right,), ace_type=AceType.ALLOW
+    )
+
+
+def _template(
+    name: str = "T",
+    *,
+    ekus: tuple[str, ...] = (CLIENT_AUTH,),
+    name_flags: tuple[str, ...] = ("ENROLLEE_SUPPLIES_SUBJECT",),
+    enrollment_flags: tuple[str, ...] = (),
+    security: tuple[AceEntry, ...] = (),
+) -> CertTemplate:
+    return CertTemplate(
+        name=name,
+        display_name=name,
+        schema_version=2,
+        oid=f"1.3.6.1.4.1.311.21.8.{name}",
+        ekus=ekus,
+        name_flags=frozenset(name_flags),
+        enrollment_flags=frozenset(enrollment_flags),
+        min_key_size=2048,
+        issuance_policy_oids=(),
+        security=security,
+        published_by=(),
+    )
 
 
 def _ca(
@@ -45,18 +88,22 @@ def _ca(
 def _estate(
     *,
     cas: tuple[CertAuthority, ...] = (),
+    templates: tuple[CertTemplate, ...] = (),
     crls: tuple[Crl, ...] = (),
     certs_parsed: bool = True,
+    skipped_passes: tuple[str, ...] = (),
 ) -> Estate:
     manifest = Manifest(
         collector_version="t",
         collected_at="",
         host="",
         domain="",
-        skipped_passes=(),
+        skipped_passes=skipped_passes,
         certs_parsed=certs_parsed,
     )
-    return Estate(cas=cas, templates=(), acls=(), oids=(), crls=crls, manifest=manifest)
+    return Estate(
+        cas=cas, templates=templates, acls=(), oids=(), crls=crls, manifest=manifest
+    )
 
 
 # --- ESC6 -----------------------------------------------------------------
@@ -73,6 +120,97 @@ def test_esc6_flagged() -> None:
 
 def test_esc6_clean_ca_no_finding() -> None:
     assert detect_esc6(_estate(cas=(_ca("GoodCA"),))) == []
+
+
+# --- ESC1 -----------------------------------------------------------------
+
+
+def test_esc1_flagged_when_all_conditions_hold() -> None:
+    tmpl = _template("VulnUserAuth", security=(_enroll_ace(),))
+    findings = detect_esc1(_estate(templates=(tmpl,)))
+    assert len(findings) == 1
+    assert findings[0].check == "ESC1"
+    assert findings[0].severity == Severity.CRITICAL
+    assert findings[0].subject == "VulnUserAuth"
+
+
+def test_esc1_no_eku_is_dangerous() -> None:
+    # A template with no EKU at all is valid for any purpose -> still ESC1.
+    tmpl = _template("NoEku", ekus=(), security=(_enroll_ace(),))
+    assert len(detect_esc1(_estate(templates=(tmpl,)))) == 1
+
+
+def test_esc1_not_flagged_without_auth_eku() -> None:
+    # Server-auth-only template cannot authenticate as a user.
+    tmpl = _template("WebOnly", ekus=(SERVER_AUTH,), security=(_enroll_ace(),))
+    assert detect_esc1(_estate(templates=(tmpl,))) == []
+
+
+def test_esc1_not_flagged_without_supplies_subject() -> None:
+    tmpl = _template("Fixed", name_flags=(), security=(_enroll_ace(),))
+    assert detect_esc1(_estate(templates=(tmpl,))) == []
+
+
+def test_esc1_mitigated_by_manager_approval() -> None:
+    tmpl = _template(
+        "Approved", enrollment_flags=("PEND_ALL_REQUESTS",), security=(_enroll_ace(),)
+    )
+    assert detect_esc1(_estate(templates=(tmpl,))) == []
+
+
+def test_esc1_not_flagged_when_only_high_priv_can_enroll() -> None:
+    tmpl = _template("AdminOnly", security=(_enroll_ace(HIGH_PRIV_SID),))
+    assert detect_esc1(_estate(templates=(tmpl,))) == []
+
+
+def test_esc1_deny_ace_does_not_count_as_enroll() -> None:
+    deny = AceEntry(
+        trustee_sid=LOW_PRIV_SID,
+        trustee_name="Domain Users",
+        rights=("Enroll",),
+        ace_type=AceType.DENY,
+    )
+    assert detect_esc1(_estate(templates=(_template("D", security=(deny,)),))) == []
+
+
+def test_esc1_broad_right_implies_enroll() -> None:
+    # GenericAll on the template implies the ability to enroll.
+    tmpl = _template("Owned", security=(_enroll_ace(right="GenericAll"),))
+    assert len(detect_esc1(_estate(templates=(tmpl,)))) == 1
+
+
+def test_esc1_degrades_when_template_security_not_collected() -> None:
+    tmpl = _template("Vuln", security=(_enroll_ace(),))
+    findings = detect_esc1(
+        _estate(templates=(tmpl,), skipped_passes=("template-security",))
+    )
+    assert len(findings) == 1
+    assert findings[0].check == "TEMPLATE_ACL_NOT_EVALUATED"
+    assert findings[0].severity == Severity.INFO
+
+
+# --- ESC9 -----------------------------------------------------------------
+
+
+def test_esc9_flagged_on_no_security_extension() -> None:
+    tmpl = _template("WeakMap", enrollment_flags=("NO_SECURITY_EXTENSION",))
+    findings = detect_esc9(_estate(templates=(tmpl,)))
+    assert len(findings) == 1
+    assert findings[0].check == "ESC9"
+    assert findings[0].severity == Severity.HIGH
+
+
+def test_esc9_clean_template_no_finding() -> None:
+    assert detect_esc9(_estate(templates=(_template("Clean"),))) == []
+
+
+def test_esc9_evaluates_even_without_template_security() -> None:
+    # ESC9 needs only enrollment flags, so it works on a real (ACL-skipped) export.
+    tmpl = _template("WeakMap", enrollment_flags=("NO_SECURITY_EXTENSION",))
+    findings = detect_esc9(
+        _estate(templates=(tmpl,), skipped_passes=("template-security",))
+    )
+    assert len(findings) == 1
 
 
 # --- lifecycle: degrade path ----------------------------------------------
