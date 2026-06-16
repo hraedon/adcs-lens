@@ -277,6 +277,23 @@ def test_esc4_genericall_flagged() -> None:
     assert len(detect_esc4(_estate(templates=(tmpl,)))) == 1
 
 
+def test_esc4_blanket_writeproperty_flagged() -> None:
+    # Blanket WriteProperty (collector token 'WritePropertyAll', from an all-zero
+    # ObjectType) can rewrite msPKI-Certificate-Name-Flag → ESC1, so it is control.
+    tmpl = _template("BlanketWrite", security=(_enroll_ace(right="WritePropertyAll"),))
+    findings = detect_esc4(_estate(templates=(tmpl,)))
+    assert len(findings) == 1
+    assert findings[0].check == "ESC4"
+    assert "WritePropertyAll" in findings[0].detail
+
+
+def test_esc4_scoped_writeproperty_not_flagged() -> None:
+    # Property-scoped WriteProperty (token 'WriteProperty') may not reach the name
+    # flags; we do not flag it without a property-set GUID map.
+    tmpl = _template("ScopedWrite", security=(_enroll_ace(right="WriteProperty"),))
+    assert detect_esc4(_estate(templates=(tmpl,))) == []
+
+
 def test_esc4_enroll_only_is_not_esc4() -> None:
     # Plain Enroll is not a control right — that is ESC1 territory, not ESC4.
     tmpl = _template("EnrollOnly", security=(_enroll_ace(right="Enroll"),))

@@ -57,10 +57,20 @@ _ENROLL_RIGHTS = frozenset(
 
 # ACE rights (lower-cased) that let a principal rewrite a template object, and so
 # turn it into ESC1 (enable enrollee-supplied subject + a client-auth EKU). These
-# are object-wide control rights; property-scoped WriteProperty is excluded to
-# avoid false positives (the ACE model does not carry the per-property ObjectType).
+# are object-wide control rights. ``writepropertyall`` is a blanket WriteProperty
+# (collector tokenises an all-zero ObjectType this way): it can rewrite any
+# property, including msPKI-Certificate-Name-Flag → ENROLLEE_SUPPLIES_SUBJECT.
+# Property-scoped WriteProperty (token ``writeproperty``) is excluded — flagging
+# it would need a property-set GUID map to know whether it reaches the name flags.
 _DANGEROUS_TEMPLATE_CONTROL = frozenset(
-    {"genericall", "genericwrite", "writedacl", "writeowner", "fullcontrol"}
+    {
+        "genericall",
+        "genericwrite",
+        "writedacl",
+        "writeowner",
+        "fullcontrol",
+        "writepropertyall",
+    }
 )
 
 # Manifest pass whose absence means template ACLs were not collected (collector
@@ -303,18 +313,20 @@ def detect_esc4(estate: Estate) -> list[Finding]:
     """Flag templates a low-privilege principal can rewrite (a path to ESC1).
 
     ESC4: a low-priv trustee holds an object-wide control right (GenericAll,
-    GenericWrite, WriteDacl, WriteOwner) on the template. They can edit the
-    template — e.g. turn on enrollee-supplied subjects and add a client-auth EKU
-    — converting it into ESC1. We flag the standing control right; we never
-    modify the template.
+    GenericWrite, WriteDacl, WriteOwner, or a *blanket* WriteProperty) on the
+    template. They can edit the template — e.g. turn on enrollee-supplied
+    subjects and add a client-auth EKU — converting it into ESC1. We flag the
+    standing control right; we never modify the template.
 
     Shares the ESC1 degradation: when template security was not collected the
     ESC1 detector emits the single ``TEMPLATE_ACL_NOT_EVALUATED`` note, so this
     returns nothing rather than duplicating it.
 
-    Scope: evaluates DACL control rights only. Owner-based control and
-    property-scoped ``WriteProperty`` are not yet modeled (the collector reads
-    the DACL, not the owner, and ACEs do not carry the per-property ObjectType).
+    Scope: evaluates DACL control rights only. Owner-based control is not yet
+    modeled (the collector reads the DACL, not the owner). Property-*scoped*
+    WriteProperty is also not flagged — distinguishing a write that reaches
+    msPKI-Certificate-Name-Flag from a harmless one would need a property-set
+    GUID map; only blanket (all-property) WriteProperty is treated as control.
     """
     if not _template_security_collected(estate):
         return []
