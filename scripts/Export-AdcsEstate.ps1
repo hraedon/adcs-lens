@@ -87,7 +87,9 @@ $ENROLL_FLAGS = [ordered]@{
 }
 function _decode([int]$value, $map) {
   $out = @()
-  foreach ($k in $map.Keys) { if ($value -band $k) { $out += $map[$k] } }
+  # Iterate entries (not $map[$k]): indexing an [ordered] dict with an int key
+  # selects BY POSITION, not by key, which silently mis-decodes / yields $null.
+  foreach ($e in $map.GetEnumerator()) { if ($value -band $e.Key) { $out += $e.Value } }
   ,$out
 }
 
