@@ -52,6 +52,14 @@ _ENROLL_RIGHTS = frozenset(
     {"enroll", "autoenroll", "allextendedrights", "genericall", "fullcontrol"}
 )
 
+# ACE rights (lower-cased) that let a principal rewrite a template object, and so
+# turn it into ESC1 (enable enrollee-supplied subject + a client-auth EKU). These
+# are object-wide control rights; property-scoped WriteProperty is excluded to
+# avoid false positives (the ACE model does not carry the per-property ObjectType).
+_DANGEROUS_TEMPLATE_CONTROL = frozenset(
+    {"genericall", "genericwrite", "writedacl", "writeowner", "fullcontrol"}
+)
+
 # Manifest pass whose absence means template ACLs were not collected (collector
 # Phase 1b). ESC checks needing the enroll ACL degrade to a note when it is
 # listed in skipped_passes.
@@ -111,17 +119,24 @@ def _can_authenticate(template: CertTemplate) -> bool:
     return any(eku in _AUTH_EKUS for eku in template.ekus)
 
 
-def _low_priv_enrollers(template: CertTemplate) -> list[AceEntry]:
-    """Allow-ACEs that grant (or imply) enroll to a low-privilege trustee."""
+def _low_priv_allow_aces(
+    template: CertTemplate, rights: frozenset[str]
+) -> list[AceEntry]:
+    """Allow-ACEs granting any of *rights* (lower-cased match) to a low-priv trustee."""
     out: list[AceEntry] = []
     for ace in template.security:
         if ace.ace_type is not AceType.ALLOW:
             continue
         if not is_low_priv_trustee(ace.trustee_sid):
             continue
-        if any(r.strip().lower() in _ENROLL_RIGHTS for r in ace.rights):
+        if any(r.strip().lower() in rights for r in ace.rights):
             out.append(ace)
     return out
+
+
+def _low_priv_enrollers(template: CertTemplate) -> list[AceEntry]:
+    """Allow-ACEs that grant (or imply) enroll to a low-privilege trustee."""
+    return _low_priv_allow_aces(template, _ENROLL_RIGHTS)
 
 
 def _template_security_collected(estate: Estate) -> bool:
@@ -185,6 +200,58 @@ def detect_esc1(estate: Estate) -> list[Finding]:
                     "requirement also gates it — not yet modeled.)"
                 ),
                 source=f"template '{tmpl.name}' (oid {tmpl.oid}): name flags + enroll ACL",
+            )
+        )
+    return findings
+
+
+def detect_esc4(estate: Estate) -> list[Finding]:
+    """Flag templates a low-privilege principal can rewrite (a path to ESC1).
+
+    ESC4: a low-priv trustee holds an object-wide control right (GenericAll,
+    GenericWrite, WriteDacl, WriteOwner) on the template. They can edit the
+    template — e.g. turn on enrollee-supplied subjects and add a client-auth EKU
+    — converting it into ESC1. We flag the standing control right; we never
+    modify the template.
+
+    Shares the ESC1 degradation: when template security was not collected the
+    ESC1 detector emits the single ``TEMPLATE_ACL_NOT_EVALUATED`` note, so this
+    returns nothing rather than duplicating it.
+
+    Scope: evaluates DACL control rights only. Owner-based control and
+    property-scoped ``WriteProperty`` are not yet modeled (the collector reads
+    the DACL, not the owner, and ACEs do not carry the per-property ObjectType).
+    """
+    if not _template_security_collected(estate):
+        return []
+    findings: list[Finding] = []
+    for tmpl in estate.templates:
+        controllers = _low_priv_allow_aces(tmpl, _DANGEROUS_TEMPLATE_CONTROL)
+        if not controllers:
+            continue
+        who = ", ".join(sorted({a.trustee_name or a.trustee_sid for a in controllers}))
+        rights = ", ".join(
+            sorted(
+                {
+                    r
+                    for a in controllers
+                    for r in a.rights
+                    if r.strip().lower() in _DANGEROUS_TEMPLATE_CONTROL
+                }
+            )
+        )
+        findings.append(
+            Finding(
+                check="ESC4",
+                severity=Severity.HIGH,
+                title="Template object is writable by a low-privilege principal",
+                subject=tmpl.display_name or tmpl.name,
+                detail=(
+                    f"{who} hold {rights} on the template and can rewrite it (e.g. "
+                    "enable enrollee-supplied subjects + a client-auth EKU) to create "
+                    "an ESC1 path. Remove the delegated control."
+                ),
+                source=f"template '{tmpl.name}': nTSecurityDescriptor DACL",
             )
         )
     return findings
@@ -359,6 +426,7 @@ def run_all(
     """Run every detector and return findings sorted worst-first, then by check."""
     findings = [
         *detect_esc1(estate),
+        *detect_esc4(estate),
         *detect_esc6(estate),
         *detect_esc9(estate),
         *detect_infra_cert_expiry(estate, now=now, warn_days=warn_days),

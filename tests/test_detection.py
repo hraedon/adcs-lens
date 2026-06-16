@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 from adcs_lens.detection import (
     detect_esc1,
+    detect_esc4,
     detect_esc6,
     detect_esc9,
     detect_infra_cert_expiry,
@@ -187,6 +188,42 @@ def test_esc1_degrades_when_template_security_not_collected() -> None:
     assert len(findings) == 1
     assert findings[0].check == "TEMPLATE_ACL_NOT_EVALUATED"
     assert findings[0].severity == Severity.INFO
+
+
+# --- ESC4 -----------------------------------------------------------------
+
+
+def test_esc4_flagged_when_low_priv_can_write_template() -> None:
+    tmpl = _template("Delegated", security=(_enroll_ace(right="WriteDacl"),))
+    findings = detect_esc4(_estate(templates=(tmpl,)))
+    assert len(findings) == 1
+    assert findings[0].check == "ESC4"
+    assert findings[0].severity == Severity.HIGH
+    assert "WriteDacl" in findings[0].detail
+
+
+def test_esc4_genericall_flagged() -> None:
+    tmpl = _template("Owned", security=(_enroll_ace(right="GenericAll"),))
+    assert len(detect_esc4(_estate(templates=(tmpl,)))) == 1
+
+
+def test_esc4_enroll_only_is_not_esc4() -> None:
+    # Plain Enroll is not a control right — that is ESC1 territory, not ESC4.
+    tmpl = _template("EnrollOnly", security=(_enroll_ace(right="Enroll"),))
+    assert detect_esc4(_estate(templates=(tmpl,))) == []
+
+
+def test_esc4_high_priv_writer_not_flagged() -> None:
+    tmpl = _template("AdminWrite", security=(_enroll_ace(HIGH_PRIV_SID, right="WriteOwner"),))
+    assert detect_esc4(_estate(templates=(tmpl,))) == []
+
+
+def test_esc4_silent_when_template_security_not_collected() -> None:
+    # ESC1 emits the degradation note; ESC4 stays silent to avoid duplicating it.
+    tmpl = _template("Delegated", security=(_enroll_ace(right="WriteDacl"),))
+    assert detect_esc4(
+        _estate(templates=(tmpl,), skipped_passes=("template-security",))
+    ) == []
 
 
 # --- ESC9 -----------------------------------------------------------------
