@@ -60,6 +60,8 @@ function _ldapRoot([string]$container) {
 function _search([DirectoryServices.DirectoryEntry]$root, [string]$filter) {
   $s = New-Object DirectoryServices.DirectorySearcher($root)
   $s.Filter = $filter; $s.PageSize = 200; $s.SearchScope = 'Subtree'
+  # Request the DACL so nTSecurityDescriptor comes back with ACEs (read-only).
+  $s.SecurityMasks = [DirectoryServices.SecurityMasks]'Dacl'
   $s.FindAll()
 }
 
@@ -86,6 +88,44 @@ $ENROLL_FLAGS = [ordered]@{
 function _decode([int]$value, $map) {
   $out = @()
   foreach ($k in $map.Keys) { if ($value -band $k) { $out += $map[$k] } }
+  ,$out
+}
+
+# --- nTSecurityDescriptor -> ACEs (ESC1/ESC4/ESC5/ESC7 inputs) --------------
+# Extended-right GUIDs we care about; an all-zero ObjectType on an ExtendedRight
+# ACE means "all extended rights" (which includes Enroll).
+$ENROLL_GUID     = '0e10c968-78fb-11d2-90d4-00c04f79dc55'
+$AUTOENROLL_GUID = 'a05b8cc2-17b1-4cc8-8b00-94f99c9c2cca'
+$ZERO_GUID       = '00000000-0000-0000-0000-000000000000'
+function _parseAces([byte[]]$sdBytes) {
+  $out = @()
+  if (-not $sdBytes -or $sdBytes.Length -eq 0) { return ,$out }
+  $sd = New-Object DirectoryServices.ActiveDirectorySecurity
+  $sd.SetSecurityDescriptorBinaryForm($sdBytes)
+  # Resolve trustees to SIDs (offline-safe); the friendly name is best-effort.
+  foreach ($a in $sd.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+    $sid  = [string]$a.IdentityReference.Value
+    $name = ''
+    try { $name = [string]$a.IdentityReference.Translate([Security.Principal.NTAccount]).Value } catch { }
+    $ot = $a.ObjectType.ToString()
+    $rights = @()
+    foreach ($flag in ($a.ActiveDirectoryRights.ToString() -split ',\s*')) {
+      if ($flag -eq 'ExtendedRight') {
+        if     ($ot -eq $ENROLL_GUID)     { $rights += 'Enroll' }
+        elseif ($ot -eq $AUTOENROLL_GUID) { $rights += 'AutoEnroll' }
+        elseif ($ot -eq $ZERO_GUID)       { $rights += 'AllExtendedRights' }
+        else                              { $rights += 'ExtendedRight' }
+      } else {
+        $rights += $flag
+      }
+    }
+    $out += [ordered]@{
+      trustee_sid  = $sid
+      trustee_name = $name
+      rights       = (@($rights))
+      ace_type     = [string]$a.AccessControlType   # 'Allow' | 'Deny'
+    }
+  }
   ,$out
 }
 
@@ -140,6 +180,7 @@ foreach ($r in (_search $tmplRoot '(objectClass=pKICertificateTemplate)')) {
   $ef = if ($p['mspki-enrollment-flag'].Count) { [int]$p['mspki-enrollment-flag'][0] } else { 0 }
   $ekus = @(); foreach ($e in $p['pkiextendedkeyusage']) { $ekus += [string]$e }
   $pol  = @(); foreach ($o in $p['mspki-certificate-policy']) { $pol += [string]$o }
+  $sdb  = if ($p['ntsecuritydescriptor'].Count) { [byte[]]$p['ntsecuritydescriptor'][0] } else { $null }
   $templates += [ordered]@{
     name              = [string]$p['cn'][0]
     display_name      = [string]$p['displayname'][0]
@@ -150,7 +191,7 @@ foreach ($r in (_search $tmplRoot '(objectClass=pKICertificateTemplate)')) {
     enrollment_flags  = (_decode $ef $ENROLL_FLAGS)
     min_key_size      = if ($p['mspki-minimal-key-size'].Count) { [int]$p['mspki-minimal-key-size'][0] } else { $null }
     issuance_policy_oids = (@($pol))
-    security          = @()   # nTSecurityDescriptor → ACEs: Plan 001 Phase 1b
+    security          = (_parseAces $sdb)   # template DACL → ACEs (ESC1/ESC4)
   }
 }
 
@@ -173,7 +214,7 @@ $manifest = [ordered]@{
   collected_at      = (Get-Date).ToUniversalTime().ToString('o')
   host              = [string](hostname)
   domain            = ((New-Object DirectoryServices.DirectoryEntry("LDAP://RootDSE", $LdapUser, $LdapPass)).defaultNamingContext)
-  skipped_passes    = @('ca-security', 'pki-acls', 'template-security', 'certs')  # Phase 1b / [certs]
+  skipped_passes    = @('ca-security', 'pki-acls', 'certs')  # remaining Phase 1b / [certs]
 }
 
 # --- write the export (force arrays so single items don't collapse) ---------

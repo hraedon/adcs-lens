@@ -113,7 +113,17 @@ def build_export(
                 "enrollment_flags": ["NO_SECURITY_EXTENSION"],
                 "min_key_size": 2048,
                 "issuance_policy_oids": [POLICY_OID],
-                "security": [],
+                # Low-priv enroll is present, but the EKU is Server Auth (not a
+                # client-auth EKU), so this is *not* ESC1 — exercises the template
+                # security round-trip without a false positive.
+                "security": [
+                    {
+                        "trustee_sid": LOW_PRIV_SID,
+                        "trustee_name": "Domain Users",
+                        "rights": ["Enroll"],
+                        "ace_type": "Allow",
+                    }
+                ],
             }
         ],
     )

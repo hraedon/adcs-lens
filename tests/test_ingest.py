@@ -50,6 +50,16 @@ def test_sid_normalized_and_low_priv(json_export: Path) -> None:
     assert is_low_priv_trustee(ace.trustee_sid)
 
 
+def test_template_security_round_trips(json_export: Path) -> None:
+    # The collector's Phase 1b template DACL pass lands in template.security as
+    # normalized ACEs; an Allow/Enroll to a low-priv trustee survives ingest.
+    estate = ingest(json_export)
+    tmpl = estate.templates[0]
+    ace = next(a for a in tmpl.security if "Enroll" in a.rights)
+    assert ace.ace_type.value == "Allow"
+    assert is_low_priv_trustee(ace.trustee_sid)
+
+
 def test_certs_parsed_bool_when_no_certs_dir(json_export: Path) -> None:
     # No certs/ dir in the json-only export; certs_parsed mirrors module
     # availability (True when [certs] installed, False otherwise) — never crashes.

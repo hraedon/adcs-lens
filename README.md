@@ -108,9 +108,10 @@ adcs-lens doctor C:\AdcsExport --json     # stable JSON envelope
 > Status: the deterministic core is built and tested (ingest → `doctor`) with
 > the **ESC1**, **ESC6**, **ESC9** and infrastructure cert/CRL-expiry detectors.
 > The read-only PowerShell **collector** (`scripts/Export-AdcsEstate.ps1`) is
-> built; it does not yet capture template/object security descriptors (Phase 1b),
-> so ACL-dependent checks (ESC1) degrade to an explicit note on a real export
-> until then. The synthetic fixture generator
+> built and now captures **template** security descriptors (their DACLs → ACEs),
+> so ESC1 evaluates on a real export. Validated end-to-end against a live
+> enterprise CA. CA-object and PKI-container ACLs (for ESC4/5/7) are the
+> remaining Phase 1b tail. The synthetic fixture generator
 > (`tests/fixtures/build_fixture.py`) exercises the full pipeline end-to-end.
 
 ## Status

@@ -79,6 +79,9 @@ exports (WI-001), never from a standing connection.
 
 ## Status
 
-The deterministic core is built and tested (ingest → `doctor`, ESC6 + infra
-lifecycle detectors, architecture guard). The read-only PowerShell collector
-(`scripts/Export-AdcsEstate.ps1`) and the full ESC suite are pending.
+The deterministic core is built and tested (ingest → `doctor`, ESC1 + ESC6 +
+ESC9 + infra lifecycle detectors, architecture guard). The read-only PowerShell
+collector (`scripts/Export-AdcsEstate.ps1`) captures CA config, templates (with
+their DACLs → ACEs), and issuance OIDs; it has been validated end-to-end against
+a live enterprise CA. Remaining: CA-object/PKI-container ACL collection (for
+ESC4/5/7) and the rest of the ESC suite (ESC2/3/11/13/15).
