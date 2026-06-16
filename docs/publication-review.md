@@ -20,8 +20,19 @@ placeholders:
 
 ## Pre-publication checklist
 
-- [ ] No real CA names, domain names, SIDs, OIDs, or template names in committed
+- [x] No real CA names, domain names, SIDs, OIDs, or template names in committed
       source, tests, fixtures, plans, or docs.
-- [ ] `.gitignore` rejects `samples/` and local environment artifacts.
-- [ ] CI is green on Python 3.12 and 3.13.
-- [ ] Architecture guard (`tests/test_architecture.py`) passes.
+- [x] **Git history scrubbed** (2026-06-16). Earlier commits leaked a real CA
+      hostname and AD domain; the repo was rewritten with `git filter-repo`
+      (placeholder substitution) and **deleted + recreated** on GitHub to purge
+      the retained `refs/pull/*` refs as well. Every commit reachable from
+      `main` is now clean; re-verify by grepping all blobs
+      (`git rev-list --all`) for the former internal CA hostname and AD-domain
+      tokens — only this checklist entry should describe them, never name them.
+- [x] `.gitignore` rejects `samples/` and local environment artifacts.
+- [x] CI is green on Python 3.12 and 3.13.
+- [x] Architecture guard (`tests/test_architecture.py`) passes.
+
+> Note: the `hraedon` GitHub handle/author name in `pyproject.toml` and project
+> URLs is the public repo identity and is intentionally retained — only internal
+> infrastructure identifiers (CA hostnames, AD domain, topology) are scrubbed.
