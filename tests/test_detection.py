@@ -8,6 +8,7 @@ from adcs_lens.detection import (
     detect_esc1,
     detect_esc4,
     detect_esc6,
+    detect_esc7,
     detect_esc9,
     detect_infra_cert_expiry,
     run_all,
@@ -70,6 +71,7 @@ def _ca(
     kind: CaKind = CaKind.ISSUING,
     edit_flags: tuple[str, ...] = (),
     certs: tuple[CertLifecycle, ...] = (),
+    security: tuple[AceEntry, ...] = (),
 ) -> CertAuthority:
     return CertAuthority(
         name=name,
@@ -81,7 +83,7 @@ def _ca(
         audit_filter=None,
         validity="",
         roles=frozenset(),
-        security=(),
+        security=security,
         certs=certs,
     )
 
@@ -224,6 +226,58 @@ def test_esc4_silent_when_template_security_not_collected() -> None:
     assert detect_esc4(
         _estate(templates=(tmpl,), skipped_passes=("template-security",))
     ) == []
+
+
+# --- ESC7 -----------------------------------------------------------------
+
+
+def test_esc7_manage_ca_by_low_priv_is_critical() -> None:
+    ca = _ca("IssuingCA", security=(_enroll_ace(right="ManageCA"),))
+    findings = detect_esc7(_estate(cas=(ca,)))
+    assert len(findings) == 1
+    assert findings[0].check == "ESC7"
+    assert findings[0].severity == Severity.CRITICAL
+
+
+def test_esc7_manage_certs_by_low_priv_is_high() -> None:
+    ca = _ca("IssuingCA", security=(_enroll_ace(right="ManageCertificates"),))
+    findings = detect_esc7(_estate(cas=(ca,)))
+    assert len(findings) == 1
+    assert findings[0].severity == Severity.HIGH
+
+
+def test_esc7_low_priv_enroll_only_no_finding() -> None:
+    # Authenticated Users with Enroll on the CA is normal, not ESC7.
+    ca = _ca("IssuingCA", security=(_enroll_ace(right="Enroll"),))
+    assert detect_esc7(_estate(cas=(ca,))) == []
+
+
+def test_esc7_high_priv_manage_not_flagged() -> None:
+    ca = _ca("IssuingCA", security=(_enroll_ace(HIGH_PRIV_SID, right="ManageCA"),))
+    assert detect_esc7(_estate(cas=(ca,))) == []
+
+
+def test_esc7_aggregates_both_roles_per_trustee_to_one_critical() -> None:
+    # Same low-priv trustee with two ACEs (ManageCA + ManageCertificates) -> one
+    # finding, escalated to critical by the Manage CA right.
+    ca = _ca(
+        "IssuingCA",
+        security=(
+            _enroll_ace(right="ManageCA"),
+            _enroll_ace(right="ManageCertificates"),
+        ),
+    )
+    findings = detect_esc7(_estate(cas=(ca,)))
+    assert len(findings) == 1
+    assert findings[0].severity == Severity.CRITICAL
+
+
+def test_esc7_degrades_when_ca_security_not_collected() -> None:
+    ca = _ca("IssuingCA", security=(_enroll_ace(right="ManageCA"),))
+    findings = detect_esc7(_estate(cas=(ca,), skipped_passes=("ca-security",)))
+    assert len(findings) == 1
+    assert findings[0].check == "CA_SECURITY_NOT_EVALUATED"
+    assert findings[0].severity == Severity.INFO
 
 
 # --- ESC9 -----------------------------------------------------------------

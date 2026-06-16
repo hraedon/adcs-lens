@@ -129,6 +129,37 @@ function _parseAces([byte[]]$sdBytes) {
   ,$out
 }
 
+# The CA's own role permissions (ESC7) live in the registry "Security" REG_BINARY,
+# not AD. Parse the raw SD so we get SIDs + CA access-mask bits directly (offline),
+# rather than certutil's name-resolved text (domain name lookups hit the double-hop).
+function _caSecurityAces([string]$caName) {
+  $out = @()
+  $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
+    "SYSTEM\CurrentControlSet\Services\CertSvc\Configuration\$caName")
+  if (-not $key) { return ,$out }
+  $bytes = $key.GetValue('Security')
+  if (-not $bytes) { return ,$out }
+  $rsd = New-Object Security.AccessControl.RawSecurityDescriptor(@([byte[]]$bytes), 0)
+  foreach ($a in $rsd.DiscretionaryAcl) {
+    $m = [int]$a.AccessMask
+    $rights = @()
+    if ($m -band 0x1)   { $rights += 'ManageCA' }            # CA_ACCESS_ADMIN
+    if ($m -band 0x2)   { $rights += 'ManageCertificates' }  # CA_ACCESS_OFFICER
+    if ($m -band 0x4)   { $rights += 'Auditor' }
+    if ($m -band 0x8)   { $rights += 'Operator' }
+    if ($m -band 0x100) { $rights += 'Read' }
+    if ($m -band 0x200) { $rights += 'Enroll' }
+    $type = if ($a.AceQualifier -eq 'AccessDenied') { 'Deny' } else { 'Allow' }
+    $out += [ordered]@{
+      trustee_sid  = [string]$a.SecurityIdentifier.Value
+      trustee_name = ''
+      rights       = (@($rights))
+      ace_type     = $type
+    }
+  }
+  ,$out
+}
+
 # --- CA registry via certutil (local, no network cred needed) ---------------
 # Parse certutil's own decoded "FLAG_NAME -- value" lines for EditFlags/InterfaceFlags.
 function _certutilFlags([string]$regpath) {
@@ -208,13 +239,18 @@ foreach ($r in (_search $oidRoot '(objectClass=msPKI-Enterprise-Oid)')) {
   }
 }
 
+# --- CA role security (ESC7) -------------------------------------------------
+# Keyed by the CA name used in ca-config.json so ingest joins them to the CA.
+$caSecurity = [ordered]@{}
+foreach ($ca in $caConfig) { $caSecurity[$ca.name] = (_caSecurityAces $ca.name) }
+
 # --- manifest ----------------------------------------------------------------
 $manifest = [ordered]@{
   collector_version = $COLLECTOR_VERSION
   collected_at      = (Get-Date).ToUniversalTime().ToString('o')
   host              = [string](hostname)
   domain            = ((New-Object DirectoryServices.DirectoryEntry("LDAP://RootDSE", $LdapUser, $LdapPass)).defaultNamingContext)
-  skipped_passes    = @('ca-security', 'pki-acls', 'certs')  # remaining Phase 1b / [certs]
+  skipped_passes    = @('pki-acls', 'certs')  # remaining Phase 1b / [certs]
 }
 
 # --- write the export (force arrays so single items don't collapse) ---------
@@ -223,7 +259,7 @@ _writeJson @($templates) 'templates.json'
 _writeJson @($oids)      'oid-objects.json'
 _writeJson @()           'pki-acls.json'
 _writeJson $enrollmentServices 'enrollment-services.json'
-_writeJson @{}           'ca-security.json'
+_writeJson $caSecurity   'ca-security.json'
 _writeJson $manifest     'collector-manifest.json'
 
 Write-Output ("OK cas={0} templates={1} oids={2} editflags=[{3}] ca={4}" -f `

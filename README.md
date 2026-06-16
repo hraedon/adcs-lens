@@ -106,8 +106,8 @@ adcs-lens doctor C:\AdcsExport --json     # stable JSON envelope
 ```
 
 > Status: the deterministic core is built and tested (ingest → `doctor`) with
-> the **ESC1**, **ESC4**, **ESC6**, **ESC9** and infrastructure cert/CRL-expiry
-> detectors.
+> the **ESC1**, **ESC4**, **ESC6**, **ESC7**, **ESC9** and infrastructure
+> cert/CRL-expiry detectors.
 > The read-only PowerShell **collector** (`scripts/Export-AdcsEstate.ps1`) is
 > built and now captures **template** security descriptors (their DACLs → ACEs),
 > so ESC1 evaluates on a real export. Validated end-to-end against a live

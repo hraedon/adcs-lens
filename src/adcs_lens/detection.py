@@ -65,6 +65,11 @@ _DANGEROUS_TEMPLATE_CONTROL = frozenset(
 # listed in skipped_passes.
 _TEMPLATE_SECURITY_PASS = "template-security"
 
+# --- ESC7: CA role permissions held by low-priv principals -------------------
+_CA_MANAGE_CA = "manageca"  # CA_ACCESS_ADMIN — full CA control
+_CA_MANAGE_CERTS = "managecertificates"  # CA_ACCESS_OFFICER — issue/approve/revoke
+_CA_SECURITY_PASS = "ca-security"
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -257,6 +262,74 @@ def detect_esc4(estate: Estate) -> list[Finding]:
     return findings
 
 
+def detect_esc7(estate: Estate) -> list[Finding]:
+    """Flag CA role rights (Manage CA / Manage Certificates) held by low-priv.
+
+    ESC7: a low-privilege principal holds **Manage CA** (can flip CA policy — e.g.
+    turn on EDITF_ATTRIBUTESUBJECTALTNAME2 → ESC6, or publish a vulnerable
+    template) or **Manage Certificates** (can approve pending requests / revoke).
+    Read from the CA's ``CA\\Security`` registry descriptor; we flag the standing
+    right, we never exercise it.
+
+    Degrades to a note when the CA security descriptor was not collected.
+    """
+    if _CA_SECURITY_PASS in estate.manifest.skipped_passes:
+        return [
+            Finding(
+                check="CA_SECURITY_NOT_EVALUATED",
+                severity=Severity.INFO,
+                title="CA role permissions not evaluated",
+                subject="(estate)",
+                detail=(
+                    "The export did not include the CA security descriptor, so ESC7 "
+                    "(Manage CA / Manage Certificates held by low-priv) was skipped. "
+                    "Re-run a collector that captures CA\\Security."
+                ),
+                source="collector-manifest.json: skipped_passes contains 'ca-security'",
+            )
+        ]
+    findings: list[Finding] = []
+    for ca in estate.cas:
+        by_trustee: dict[str, tuple[str, set[str]]] = {}
+        for ace in ca.security:
+            if ace.ace_type is not AceType.ALLOW:
+                continue
+            if not is_low_priv_trustee(ace.trustee_sid):
+                continue
+            manage = {r.strip().lower() for r in ace.rights} & {
+                _CA_MANAGE_CA,
+                _CA_MANAGE_CERTS,
+            }
+            if not manage:
+                continue
+            _, rights = by_trustee.setdefault(ace.trustee_sid, (ace.trustee_name, set()))
+            rights |= manage
+        for sid, (name, rights) in by_trustee.items():
+            who = name or sid
+            if _CA_MANAGE_CA in rights:
+                severity = Severity.CRITICAL
+                role = "Manage CA (full CA control)"
+            else:
+                severity = Severity.HIGH
+                role = "Manage Certificates (approve/issue/revoke)"
+            findings.append(
+                Finding(
+                    check="ESC7",
+                    severity=severity,
+                    title="CA role right held by a low-privilege principal",
+                    subject=ca.name,
+                    detail=(
+                        f"{who} holds {role} on this CA. Manage CA can flip CA policy "
+                        "(e.g. enable requester-supplied SANs → ESC6) or publish a "
+                        "vulnerable template; Manage Certificates can approve pending "
+                        "requests. Remove the role from low-privilege principals."
+                    ),
+                    source=f"{ca.config_string or ca.name}: CA\\Security",
+                )
+            )
+    return findings
+
+
 def detect_esc9(estate: Estate) -> list[Finding]:
     """Flag templates with CT_FLAG_NO_SECURITY_EXTENSION set.
 
@@ -428,6 +501,7 @@ def run_all(
         *detect_esc1(estate),
         *detect_esc4(estate),
         *detect_esc6(estate),
+        *detect_esc7(estate),
         *detect_esc9(estate),
         *detect_infra_cert_expiry(estate, now=now, warn_days=warn_days),
     ]
