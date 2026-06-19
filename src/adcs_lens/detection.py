@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from adcs_lens.model import (
     AceEntry,
     AceType,
+    CaKind,
     CertKind,
     CertTemplate,
     Crl,
@@ -24,6 +25,17 @@ from adcs_lens.model import (
     Severity,
 )
 from adcs_lens.normalize import is_low_priv_trustee
+
+# Explicit worst-first severity ordering. Severity is a StrEnum, so a naive sort
+# would order alphabetically (critical, high, info, low, medium) and wrongly place
+# INFO above MEDIUM/LOW. This rank is the authority for "worst-first" output.
+_SEVERITY_RANK: dict[Severity, int] = {
+    Severity.CRITICAL: 0,
+    Severity.HIGH: 1,
+    Severity.MEDIUM: 2,
+    Severity.LOW: 3,
+    Severity.INFO: 4,
+}
 
 # ESC6: requester-supplied SAN honored CA-wide regardless of template.
 _EDITF_SAN2 = "EDITF_ATTRIBUTESUBJECTALTNAME2"
@@ -82,6 +94,9 @@ _TEMPLATE_SECURITY_PASS = "template-security"
 _CA_MANAGE_CA = "manageca"  # CA_ACCESS_ADMIN — full CA control
 _CA_MANAGE_CERTS = "managecertificates"  # CA_ACCESS_OFFICER — issue/approve/revoke
 _CA_SECURITY_PASS = "ca-security"
+
+# ESC11: RPC (ICertPassage) encrypted certificate request enforcement flag.
+_ESC11_FLAG = "IF_ENFORCEENCRYPTICERTREQUEST"
 
 
 @dataclass(frozen=True)
@@ -193,6 +208,8 @@ def detect_esc1(estate: Estate) -> list[Finding]:
         ]
     findings: list[Finding] = []
     for tmpl in estate.templates:
+        if not tmpl.acl_obtained:
+            continue
         if not (tmpl.name_flags & _ENROLLEE_SUPPLIES_SUBJECT):
             continue
         if not _can_authenticate(tmpl):
@@ -239,6 +256,8 @@ def detect_esc2(estate: Estate) -> list[Finding]:
         return []
     findings: list[Finding] = []
     for tmpl in estate.templates:
+        if not tmpl.acl_obtained:
+            continue
         any_purpose = (not tmpl.ekus) or (_ANY_PURPOSE in tmpl.ekus)
         if not any_purpose:
             continue
@@ -283,6 +302,8 @@ def detect_esc3(estate: Estate) -> list[Finding]:
         return []
     findings: list[Finding] = []
     for tmpl in estate.templates:
+        if not tmpl.acl_obtained:
+            continue
         if _ENROLLMENT_AGENT_EKU not in tmpl.ekus:
             continue
         if _MANAGER_APPROVAL in tmpl.enrollment_flags:
@@ -332,6 +353,8 @@ def detect_esc4(estate: Estate) -> list[Finding]:
         return []
     findings: list[Finding] = []
     for tmpl in estate.templates:
+        if not tmpl.acl_obtained:
+            continue
         controllers = _low_priv_allow_aces(tmpl, _DANGEROUS_TEMPLATE_CONTROL)
         if not controllers:
             continue
@@ -459,6 +482,149 @@ def detect_esc9(estate: Estate) -> list[Finding]:
                     source=f"template '{tmpl.name}': msPKI-Enrollment-Flag",
                 )
             )
+    return findings
+
+
+def detect_template_acl_gaps(estate: Estate) -> list[Finding]:
+    """Flag templates whose DACL was requested but not obtained.
+
+    When the ``template-security`` pass ran but an individual template's
+    ``nTSecurityDescriptor`` came back empty (LDAP denial, corrupt SD), its
+    enroll/control rights could not be evaluated and it would otherwise silently
+    pass every ESC1/2/3/4/13 check — indistinguishable from a genuinely safe
+    template. This emits one INFO note per such template so the gap is visible
+    rather than hidden; ESC1/2/3/4/13 themselves skip these templates.
+
+    Silent when the pass was skipped wholesale: in that case ESC1 already emits
+    the single estate-level ``TEMPLATE_ACL_NOT_EVALUATED`` note, so duplicating
+    it here would be noise.
+    """
+    if not _template_security_collected(estate):
+        return []
+    findings: list[Finding] = []
+    for tmpl in estate.templates:
+        if tmpl.acl_obtained:
+            continue
+        findings.append(
+            Finding(
+                check="TEMPLATE_ACL_UNREADABLE",
+                severity=Severity.INFO,
+                title="Template DACL was requested but not obtained",
+                subject=tmpl.display_name or tmpl.name,
+                detail=(
+                    "The collector ran the template-security pass but this "
+                    "template's nTSecurityDescriptor came back empty (LDAP denial "
+                    "or corrupt SD), so its ESC1/2/3/4/13 enroll and control rights "
+                    "could not be evaluated. Re-collect with adequate read rights "
+                    "on the template object."
+                ),
+                source=f"template '{tmpl.name}': nTSecurityDescriptor not obtained",
+            )
+        )
+    return findings
+
+
+def _group_linked_policies(estate: Estate) -> dict[str, str]:
+    """Return a map of issuance-policy OID -> linked group SID (ESC13)."""
+    return {o.oid: o.group_link_sid for o in estate.oids if o.group_link_sid}
+
+
+def detect_esc11(estate: Estate) -> list[Finding]:
+    """Flag non-root CAs missing ``IF_ENFORCEENCRYPTICERTREQUEST``.
+
+    ESC11: when the ICertPassage RPC interface does not require an encrypted
+    certificate request, an attacker can relay NTLM authentication to the CA
+    and request a certificate as the relayed principal. We flag the enabling
+    ``CA\\InterfaceFlags`` configuration; the relay itself is out of scope and is
+    never confirmed by this read-only check.
+
+    Root CAs are excluded by design: a two-tier offline root does not serve RPC
+    client enrollment, so flagging it would be a false positive.
+    """
+    findings: list[Finding] = []
+    for ca in estate.cas:
+        if ca.kind is CaKind.ROOT:
+            continue
+        if _ESC11_FLAG in ca.interface_flags:
+            continue
+        findings.append(
+            Finding(
+                check="ESC11",
+                severity=Severity.HIGH,
+                title="CA RPC enrollment does not require encrypted requests",
+                subject=ca.name,
+                detail=(
+                    "ICertPassage is not required to use an encrypted certificate "
+                    "request, enabling NTLM-relay-to-enrollment (ESC11). The relay "
+                    "itself is NOT confirmed by this read-only check. Enable the flag: "
+                    "certutil -setreg CA\\InterfaceFlags +IF_ENFORCEENCRYPTICERTREQUEST, "
+                    "then restart certsvc."
+                ),
+                source=f"{ca.config_string or ca.name}: CA\\InterfaceFlags",
+            )
+        )
+    return findings
+
+
+def detect_esc13(estate: Estate) -> list[Finding]:
+    """Flag group-linked issuance policies on low-priv-enrollable auth templates.
+
+    ESC13: an issuance-policy OID maps to a group via ``msDS-OIDToGroupLink``; a
+    client-auth-capable template advertises that OID; and a low-privilege
+    principal can enroll. Authenticating with the issued certificate then grants
+    the enrollee the privileges of the linked group. We only flag when the
+    template can authenticate its subject (no EKU, Any-Purpose, or a client-auth
+    EKU) because a non-auth certificate cannot deliver the group escalation in
+    practice. The CPO ESC13 condition that the requester is not already in the
+    linked group is automatically satisfied here: the threat is a low-priv
+    enrollee being mapped to a typically more privileged group.
+
+    Degrades like ESC1/2/3/4: when template security descriptors were not
+    collected, ESC1 emits the single estate-level note, so this returns nothing.
+    """
+    if not _template_security_collected(estate):
+        return []
+    policy_map = _group_linked_policies(estate)
+    oid_names = {o.oid: o.name for o in estate.oids if o.group_link_sid}
+    findings: list[Finding] = []
+    for tmpl in estate.templates:
+        if not tmpl.acl_obtained:
+            continue
+        if _MANAGER_APPROVAL in tmpl.enrollment_flags:
+            continue
+        linked = [o for o in tmpl.issuance_policy_oids if o in policy_map]
+        if not linked:
+            continue
+        if not _can_authenticate(tmpl):
+            continue
+        enrollers = _low_priv_enrollers(tmpl)
+        if not enrollers:
+            continue
+        who = ", ".join(sorted({a.trustee_name or a.trustee_sid for a in enrollers}))
+        policy_lines = ", ".join(
+            f"{oid} ({oid_names.get(oid, '')}) -> {policy_map[oid]}" for oid in linked
+        )
+        findings.append(
+            Finding(
+                check="ESC13",
+                severity=Severity.HIGH,
+                title="Group-linked issuance policy enrollable by low-priv",
+                subject=tmpl.display_name or tmpl.name,
+                detail=(
+                    f"Enrollable by {who}; issuance polic"
+                    f"{'y' if len(linked) == 1 else 'ies'} {policy_lines} map to "
+                    "privileged group(s). Authenticating with the resulting certificate "
+                    "grants the enrollee the privileges of the linked group (impact "
+                    "depends on the group; could be Domain Admins). Remove "
+                    "msDS-OIDToGroupLink or restrict enroll rights / require manager "
+                    "approval."
+                ),
+                source=(
+                    f"template '{tmpl.name}' (oid {tmpl.oid}): "
+                    "msPKI-Certificate-Policy + msDS-OIDToGroupLink"
+                ),
+            )
+        )
     return findings
 
 
@@ -606,7 +772,10 @@ def run_all(
         *detect_esc6(estate),
         *detect_esc7(estate),
         *detect_esc9(estate),
+        *detect_template_acl_gaps(estate),
+        *detect_esc11(estate),
+        *detect_esc13(estate),
         *detect_infra_cert_expiry(estate, now=now, warn_days=warn_days),
     ]
-    findings.sort(key=lambda f: (f.severity, f.check, f.subject))
+    findings.sort(key=lambda f: (_SEVERITY_RANK[f.severity], f.check, f.subject))
     return findings

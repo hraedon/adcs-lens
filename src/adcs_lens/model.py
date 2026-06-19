@@ -134,6 +134,9 @@ class CertTemplate:
     issuance_policy_oids: tuple[str, ...]
     security: tuple[AceEntry, ...]
     published_by: tuple[str, ...]
+    # True when the collector obtained this template's nTSecurityDescriptor.
+    # Default True so pre-field exports read as "no gap" (no false signal).
+    acl_obtained: bool = True
 
 
 @dataclass(frozen=True)

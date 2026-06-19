@@ -232,6 +232,7 @@ foreach ($r in (_search $tmplRoot '(objectClass=pKICertificateTemplate)')) {
     min_key_size      = if ($p['mspki-minimal-key-size'].Count) { [int]$p['mspki-minimal-key-size'][0] } else { $null }
     issuance_policy_oids = (@($pol))
     security          = (_parseAces $sdb)   # template DACL → ACEs (ESC1/ESC4)
+    acl_obtained      = ($null -ne $sdb)    # SD requested & obtained (per-template gap signal)
   }
 }
 

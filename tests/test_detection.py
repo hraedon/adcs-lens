@@ -12,7 +12,10 @@ from adcs_lens.detection import (
     detect_esc6,
     detect_esc7,
     detect_esc9,
+    detect_esc11,
+    detect_esc13,
     detect_infra_cert_expiry,
+    detect_template_acl_gaps,
     run_all,
 )
 from adcs_lens.model import (
@@ -26,6 +29,7 @@ from adcs_lens.model import (
     Crl,
     CrlTier,
     Estate,
+    IssuanceOid,
     Manifest,
     Severity,
 )
@@ -38,6 +42,8 @@ ANY_PURPOSE = "2.5.29.37.0"
 ENROLLMENT_AGENT = "1.3.6.1.4.1.311.20.2.1"
 LOW_PRIV_SID = "S-1-5-21-1111111111-2222222222-3333333333-513"  # Domain Users
 HIGH_PRIV_SID = "S-1-5-21-1111111111-2222222222-3333333333-512"  # Domain Admins
+POLICY_OID = "1.3.6.1.4.1.311.21.8.1.2.3.4.999"
+DOMAIN_ADMINS_SID = "S-1-5-21-1111111111-2222222222-3333333333-512"
 
 
 def _enroll_ace(sid: str = LOW_PRIV_SID, *, right: str = "Enroll") -> AceEntry:
@@ -52,7 +58,9 @@ def _template(
     ekus: tuple[str, ...] = (CLIENT_AUTH,),
     name_flags: tuple[str, ...] = ("ENROLLEE_SUPPLIES_SUBJECT",),
     enrollment_flags: tuple[str, ...] = (),
+    issuance_policy_oids: tuple[str, ...] = (),
     security: tuple[AceEntry, ...] = (),
+    acl_obtained: bool = True,
 ) -> CertTemplate:
     return CertTemplate(
         name=name,
@@ -63,9 +71,10 @@ def _template(
         name_flags=frozenset(name_flags),
         enrollment_flags=frozenset(enrollment_flags),
         min_key_size=2048,
-        issuance_policy_oids=(),
+        issuance_policy_oids=issuance_policy_oids,
         security=security,
         published_by=(),
+        acl_obtained=acl_obtained,
     )
 
 
@@ -74,6 +83,7 @@ def _ca(
     *,
     kind: CaKind = CaKind.ISSUING,
     edit_flags: tuple[str, ...] = (),
+    interface_flags: tuple[str, ...] = (),
     certs: tuple[CertLifecycle, ...] = (),
     security: tuple[AceEntry, ...] = (),
 ) -> CertAuthority:
@@ -83,7 +93,7 @@ def _ca(
         config_string=f"host\\{name}",
         kind=kind,
         edit_flags=frozenset(edit_flags),
-        interface_flags=frozenset(),
+        interface_flags=frozenset(interface_flags),
         audit_filter=None,
         validity="",
         roles=frozenset(),
@@ -97,6 +107,7 @@ def _estate(
     cas: tuple[CertAuthority, ...] = (),
     templates: tuple[CertTemplate, ...] = (),
     crls: tuple[Crl, ...] = (),
+    oids: tuple[IssuanceOid, ...] = (),
     certs_parsed: bool = True,
     skipped_passes: tuple[str, ...] = (),
 ) -> Estate:
@@ -109,7 +120,7 @@ def _estate(
         certs_parsed=certs_parsed,
     )
     return Estate(
-        cas=cas, templates=templates, acls=(), oids=(), crls=crls, manifest=manifest
+        cas=cas, templates=templates, acls=(), oids=oids, crls=crls, manifest=manifest
     )
 
 
@@ -389,6 +400,82 @@ def test_esc9_evaluates_even_without_template_security() -> None:
     assert len(findings) == 1
 
 
+# --- template ACL gap -----------------------------------------------------
+
+
+def test_acl_gap_emits_one_info_per_unreadable_template() -> None:
+    # One unreadable template (otherwise ESC1-positive) + one readable clean one.
+    unreadable = _template("Unreadable", security=(_enroll_ace(),), acl_obtained=False)
+    readable = _template("Readable", security=(_enroll_ace(),), acl_obtained=True)
+    findings = detect_template_acl_gaps(_estate(templates=(unreadable, readable)))
+    assert len(findings) == 1
+    assert findings[0].check == "TEMPLATE_ACL_UNREADABLE"
+    assert findings[0].severity == Severity.INFO
+    assert findings[0].subject == "Unreadable"
+    # Detail enumerates exactly the ACL-dependent detectors that were skipped.
+    assert "ESC1/2/3/4/13" in findings[0].detail
+
+
+def test_acl_gap_silent_when_template_security_not_collected() -> None:
+    # Estate-level degrade owns the note when the whole pass was skipped.
+    tmpl = _template("Unreadable", security=(_enroll_ace(),), acl_obtained=False)
+    estate = _estate(templates=(tmpl,), skipped_passes=("template-security",))
+    assert detect_template_acl_gaps(estate) == []
+
+
+def test_esc1_skips_unreadable_template() -> None:
+    # ESC1-positive but acl_obtained=False -> gap detector owns the note, ESC1 silent.
+    tmpl = _template("Unreadable", security=(_enroll_ace(),), acl_obtained=False)
+    assert detect_esc1(_estate(templates=(tmpl,))) == []
+
+
+def test_esc4_skips_unreadable_template() -> None:
+    # ESC4-positive (WriteDacl to low-priv) but acl_obtained=False -> ESC4 silent.
+    tmpl = _template(
+        "Writable", security=(_enroll_ace(right="WriteDacl"),), acl_obtained=False
+    )
+    assert detect_esc4(_estate(templates=(tmpl,))) == []
+
+
+def test_esc2_skips_unreadable_template() -> None:
+    # No-EKU (any-purpose) + low-priv enroll is ESC2-positive, but unreadable DACL
+    # means the enroll ACL cannot be evaluated -> ESC2 silent, gap detector owns it.
+    tmpl = _template("Any", ekus=(), security=(_enroll_ace(),), acl_obtained=False)
+    assert detect_esc2(_estate(templates=(tmpl,))) == []
+
+
+def test_esc3_skips_unreadable_template() -> None:
+    tmpl = _template(
+        "Agent", ekus=(ENROLLMENT_AGENT,), security=(_enroll_ace(),), acl_obtained=False
+    )
+    assert detect_esc3(_estate(templates=(tmpl,))) == []
+
+
+def test_esc9_still_evaluates_unreadable_template() -> None:
+    # ESC9 does not depend on the ACL — still flagged even when acl_obtained=False.
+    tmpl = _template(
+        "WeakMap", enrollment_flags=("NO_SECURITY_EXTENSION",), acl_obtained=False
+    )
+    findings = detect_esc9(_estate(templates=(tmpl,)))
+    assert len(findings) == 1
+    assert findings[0].check == "ESC9"
+
+
+def test_acl_gap_wired_into_run_all() -> None:
+    # Unreadable-template estate: TEMPLATE_ACL_UNREADABLE present, matching ESC1
+    # absent, but ESC9 present because the template also has NO_SECURITY_EXTENSION.
+    tmpl = _template(
+        "Unreadable",
+        security=(_enroll_ace(),),
+        enrollment_flags=("NO_SECURITY_EXTENSION",),
+        acl_obtained=False,
+    )
+    checks = {f.check for f in run_all(_estate(templates=(tmpl,)))}
+    assert "TEMPLATE_ACL_UNREADABLE" in checks
+    assert "ESC1" not in checks
+    assert "ESC9" in checks
+
+
 # --- lifecycle: degrade path ----------------------------------------------
 
 
@@ -499,6 +586,195 @@ def test_fresh_crl_no_finding() -> None:
     assert detect_infra_cert_expiry(_estate(crls=(crl,)), now=NOW) == []
 
 
+# --- ESC11 ----------------------------------------------------------------
+
+
+def test_esc11_flagged_when_flag_absent() -> None:
+    estate = _estate(cas=(_ca("IssuingCA", interface_flags=()),))
+    findings = detect_esc11(estate)
+    assert len(findings) == 1
+    assert findings[0].check == "ESC11"
+    assert findings[0].severity == Severity.HIGH
+    assert findings[0].subject == "IssuingCA"
+    assert "InterfaceFlags" in findings[0].source
+
+
+def test_esc11_clean_when_flag_present() -> None:
+    estate = _estate(
+        cas=(_ca("IssuingCA", interface_flags=("IF_ENFORCEENCRYPTICERTREQUEST",)),)
+    )
+    assert detect_esc11(estate) == []
+
+
+def test_esc11_root_ca_not_flagged_even_if_flag_absent() -> None:
+    estate = _estate(cas=(_ca("RootCA", kind=CaKind.ROOT, interface_flags=()),))
+    assert detect_esc11(estate) == []
+
+
+def test_esc11_flagged_when_only_unrelated_flags_present() -> None:
+    # An unrelated interface flag does not mask the absence of the encryption
+    # requirement — this is exactly the CA that should be flagged.
+    estate = _estate(cas=(_ca("IssuingCA", interface_flags=("IF_LOCKICERTREQUEST",)),))
+    findings = detect_esc11(estate)
+    assert len(findings) == 1
+    assert findings[0].check == "ESC11"
+
+
+# --- ESC13 ----------------------------------------------------------------
+
+
+def test_esc13_flagged_when_policy_linked_and_low_priv_enroll() -> None:
+    tmpl = _template(
+        "LinkedPolicy",
+        ekus=(CLIENT_AUTH,),
+        issuance_policy_oids=(POLICY_OID,),
+        security=(_enroll_ace(),),
+    )
+    estate = _estate(
+        templates=(tmpl,),
+        oids=(IssuanceOid(POLICY_OID, "Linked", DOMAIN_ADMINS_SID),),
+    )
+    findings = detect_esc13(estate)
+    assert len(findings) == 1
+    assert findings[0].check == "ESC13"
+    assert findings[0].severity == Severity.HIGH
+    assert findings[0].subject == "LinkedPolicy"
+    assert DOMAIN_ADMINS_SID in findings[0].detail
+
+
+def test_esc13_not_flagged_when_policy_not_group_linked() -> None:
+    tmpl = _template(
+        "UnlinkedPolicy",
+        ekus=(CLIENT_AUTH,),
+        issuance_policy_oids=(POLICY_OID,),
+        security=(_enroll_ace(),),
+    )
+    estate = _estate(
+        templates=(tmpl,),
+        oids=(IssuanceOid(POLICY_OID, "Linked", None),),
+    )
+    assert detect_esc13(estate) == []
+
+
+def test_esc13_not_flagged_without_auth_eku() -> None:
+    tmpl = _template(
+        "ServerPolicy",
+        ekus=(SERVER_AUTH,),
+        issuance_policy_oids=(POLICY_OID,),
+        security=(_enroll_ace(),),
+    )
+    estate = _estate(
+        templates=(tmpl,),
+        oids=(IssuanceOid(POLICY_OID, "Linked", DOMAIN_ADMINS_SID),),
+    )
+    assert detect_esc13(estate) == []
+
+
+def test_esc13_mitigated_by_manager_approval() -> None:
+    tmpl = _template(
+        "ApprovedPolicy",
+        ekus=(CLIENT_AUTH,),
+        issuance_policy_oids=(POLICY_OID,),
+        enrollment_flags=("PEND_ALL_REQUESTS",),
+        security=(_enroll_ace(),),
+    )
+    estate = _estate(
+        templates=(tmpl,),
+        oids=(IssuanceOid(POLICY_OID, "Linked", DOMAIN_ADMINS_SID),),
+    )
+    assert detect_esc13(estate) == []
+
+
+def test_esc13_requires_low_priv_enroll() -> None:
+    tmpl = _template(
+        "AdminPolicy",
+        ekus=(CLIENT_AUTH,),
+        issuance_policy_oids=(POLICY_OID,),
+        security=(_enroll_ace(HIGH_PRIV_SID),),
+    )
+    estate = _estate(
+        templates=(tmpl,),
+        oids=(IssuanceOid(POLICY_OID, "Linked", DOMAIN_ADMINS_SID),),
+    )
+    assert detect_esc13(estate) == []
+
+
+def test_esc13_silent_when_template_security_not_collected() -> None:
+    tmpl = _template(
+        "LinkedPolicy",
+        ekus=(CLIENT_AUTH,),
+        issuance_policy_oids=(POLICY_OID,),
+        security=(_enroll_ace(),),
+    )
+    estate = _estate(
+        templates=(tmpl,),
+        oids=(IssuanceOid(POLICY_OID, "Linked", DOMAIN_ADMINS_SID),),
+        skipped_passes=("template-security",),
+    )
+    assert detect_esc13(estate) == []
+
+
+def test_esc13_skips_unreadable_template() -> None:
+    # ESC13 also depends on the enroll ACL; an unreadable-DACL template with a
+    # group-linked policy is skipped (the gap detector owns the note).
+    tmpl = _template(
+        "UnreadablePolicy",
+        ekus=(CLIENT_AUTH,),
+        issuance_policy_oids=(POLICY_OID,),
+        security=(_enroll_ace(),),
+        acl_obtained=False,
+    )
+    estate = _estate(
+        templates=(tmpl,), oids=(IssuanceOid(POLICY_OID, "L", DOMAIN_ADMINS_SID),)
+    )
+    assert detect_esc13(estate) == []
+    # And the gap detector surfaces it instead.
+    assert any(
+        f.check == "TEMPLATE_ACL_UNREADABLE" for f in detect_template_acl_gaps(estate)
+    )
+
+
+def test_esc13_flagged_when_no_eku() -> None:
+    # No EKU = valid for any purpose (incl. client auth) -> the dangerous
+    # SubCA-equivalent case; still auth-capable, so still ESC13.
+    tmpl = _template(
+        "NoEkuPolicy", ekus=(), issuance_policy_oids=(POLICY_OID,), security=(_enroll_ace(),)
+    )
+    estate = _estate(templates=(tmpl,), oids=(IssuanceOid(POLICY_OID, "L", DOMAIN_ADMINS_SID),))
+    assert len(detect_esc13(estate)) == 1
+
+
+def test_esc13_flagged_with_any_purpose_eku() -> None:
+    tmpl = _template(
+        "AnyPurposePolicy",
+        ekus=(ANY_PURPOSE,),
+        issuance_policy_oids=(POLICY_OID,),
+        security=(_enroll_ace(),),
+    )
+    estate = _estate(templates=(tmpl,), oids=(IssuanceOid(POLICY_OID, "L", DOMAIN_ADMINS_SID),))
+    assert len(detect_esc13(estate)) == 1
+
+
+def test_esc13_not_flagged_when_template_has_no_policy() -> None:
+    tmpl = _template("Plain", ekus=(CLIENT_AUTH,), security=(_enroll_ace(),))
+    estate = _estate(
+        templates=(tmpl,), oids=(IssuanceOid(POLICY_OID, "L", DOMAIN_ADMINS_SID),)
+    )
+    assert detect_esc13(estate) == []
+
+
+def test_esc13_not_flagged_when_oid_absent_from_estate() -> None:
+    # Template references a policy OID that is not present (or not group-linked)
+    # in estate.oids -> no join -> no finding.
+    tmpl = _template(
+        "OrphanPolicy",
+        ekus=(CLIENT_AUTH,),
+        issuance_policy_oids=(POLICY_OID,),
+        security=(_enroll_ace(),),
+    )
+    assert detect_esc13(_estate(templates=(tmpl,), oids=())) == []
+
+
 # --- composition ----------------------------------------------------------
 
 
@@ -512,4 +788,60 @@ def test_run_all_sorted_worst_first() -> None:
     findings = run_all(estate, now=NOW)
     severities = [f.severity for f in findings]
     assert severities == sorted(severities)
+    assert findings[0].severity == Severity.CRITICAL
+
+
+def test_run_all_includes_esc11_and_esc13() -> None:
+    # Lock the wiring: both new detectors are reachable through run_all.
+    tmpl = _template(
+        "LinkedPolicy",
+        ekus=(CLIENT_AUTH,),
+        name_flags=(),
+        issuance_policy_oids=(POLICY_OID,),
+        security=(_enroll_ace(),),
+    )
+    estate = _estate(
+        cas=(_ca("RelayCA", interface_flags=()),),
+        templates=(tmpl,),
+        oids=(IssuanceOid(POLICY_OID, "L", DOMAIN_ADMINS_SID),),
+    )
+    checks = {f.check for f in run_all(estate)}
+    assert "ESC11" in checks
+    assert "ESC13" in checks
+
+
+def test_severity_rank_is_worst_first_not_alphabetical() -> None:
+    # run_all sorts by _SEVERITY_RANK; a StrEnum would otherwise sort
+    # alphabetically as critical,high,info,low,medium (INFO before MEDIUM/LOW).
+    # This locks the explicit rank against such a regression.
+    from adcs_lens.detection import _SEVERITY_RANK
+
+    worst_first = [
+        Severity.CRITICAL,
+        Severity.HIGH,
+        Severity.MEDIUM,
+        Severity.LOW,
+        Severity.INFO,
+    ]
+    assert list(_SEVERITY_RANK.keys()) == worst_first
+    # Ordering the enum members by the rank must NOT match naive sorted() order.
+    by_rank = sorted(worst_first, key=_SEVERITY_RANK.__getitem__)
+    assert by_rank == worst_first
+    # If this ever fails, Severity gained a natural order — revisit the rank.
+    assert by_rank != sorted(worst_first)
+
+
+def test_run_all_puts_info_degradation_last() -> None:
+    # Real-output smoke: an INFO degradation note must sort after every actionable
+    # finding, not between HIGH and (future) MEDIUM.
+    cert = CertLifecycle(
+        "CN=Soon", CertKind.ISSUING_CA, NOW, NOW + timedelta(days=30), "sha256", 2048
+    )
+    estate = _estate(
+        templates=(_template("Vuln", security=(_enroll_ace(),)),),  # ESC1 CRITICAL
+        cas=(_ca("CA", certs=(cert,)),),  # cert-expiry HIGH
+        skipped_passes=("ca-security",),  # ESC7 INFO degradation note
+    )
+    findings = run_all(estate, now=NOW)
+    assert findings[-1].severity == Severity.INFO
     assert findings[0].severity == Severity.CRITICAL

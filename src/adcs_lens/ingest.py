@@ -270,6 +270,9 @@ def _template(
     published_by: tuple[str, ...],
     schema_version: int,
 ) -> CertTemplate:
+    # default True for backward compat with pre-field exports (no false gap signal)
+    acl_obtained_raw = t.get("acl_obtained", True)
+    acl_obtained = acl_obtained_raw if isinstance(acl_obtained_raw, bool) else True
     return CertTemplate(
         name=name,
         display_name=_coerce_str(t.get("display_name", name)),
@@ -282,4 +285,5 @@ def _template(
         issuance_policy_oids=tuple(_coerce_str(p) for p in t.get("issuance_policy_oids", [])),
         security=_aces(t.get("security")),
         published_by=published_by,
+        acl_obtained=acl_obtained,
     )

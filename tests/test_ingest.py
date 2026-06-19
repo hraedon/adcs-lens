@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,8 @@ def test_template_security_round_trips(json_export: Path) -> None:
     ace = next(a for a in tmpl.security if "Enroll" in a.rights)
     assert ace.ace_type.value == "Allow"
     assert is_low_priv_trustee(ace.trustee_sid)
+    # The fixture does not emit acl_obtained -> default True (no false gap signal).
+    assert tmpl.acl_obtained is True
 
 
 def test_certs_parsed_bool_when_no_certs_dir(json_export: Path) -> None:
@@ -104,6 +107,33 @@ def test_null_manifest_fields_coerce_to_empty(tmp_path: Path) -> None:
     assert m.domain == ""
 
 
+def test_template_acl_obtained_round_trips(tmp_path: Path) -> None:
+    # Explicit false round-trips through ingest.
+    (tmp_path / "collector-manifest.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "templates.json").write_text(
+        json.dumps([{"name": "T", "acl_obtained": False}]), encoding="utf-8"
+    )
+    assert ingest(tmp_path).templates[0].acl_obtained is False
+
+    # Absent key defaults to True (backward compat with pre-field exports).
+    d2 = tmp_path / "no_key"
+    d2.mkdir()
+    (d2 / "collector-manifest.json").write_text("{}", encoding="utf-8")
+    (d2 / "templates.json").write_text(json.dumps([{"name": "T"}]), encoding="utf-8")
+    assert ingest(d2).templates[0].acl_obtained is True
+
+    # Non-bool values (null, string, int) fall back to True — a corrupt/wrong-type
+    # field must never raise a false gap signal on a real export.
+    for bad in (None, "false", "true", 0, 1):
+        d3 = tmp_path / f"bad_{bad!r}"
+        d3.mkdir()
+        (d3 / "collector-manifest.json").write_text("{}", encoding="utf-8")
+        (d3 / "templates.json").write_text(
+            json.dumps([{"name": "T", "acl_obtained": bad}]), encoding="utf-8"
+        )
+        assert ingest(d3).templates[0].acl_obtained is True
+
+
 def test_full_export_lifecycle(full_export: Path) -> None:
     estate = ingest(full_export)
     assert estate.manifest.certs_parsed is True
@@ -117,3 +147,6 @@ def test_severity_enum_round_trips(json_export: Path) -> None:
     findings = run_all(ingest(json_export))
     esc6 = next(f for f in findings if f.check == "ESC6")
     assert esc6.severity == Severity.CRITICAL
+    # The fixture does not emit acl_obtained; it must default to True so no
+    # spurious per-template ACL-gap note appears on backward-compat data.
+    assert all(f.check != "TEMPLATE_ACL_UNREADABLE" for f in findings)
