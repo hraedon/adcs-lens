@@ -3,14 +3,17 @@
 Tracked items from the 2026-06-16 independent security-correctness review of the
 detection path. Resolved items are dropped from this list.
 
-## [MEDIUM] No per-template signal when a template's DACL was unreadable
+## [RESOLVED] ESC4 misses blanket `WriteProperty` on templates
 
-Estate-level degradation works (`template-security` in `skipped_passes` → ESC1
-emits `TEMPLATE_ACL_NOT_EVALUATED`). But if the pass *ran* and a single template's
-`nTSecurityDescriptor` came back empty/unreadable (LDAP denial, corrupt SD),
-`template.security` is `()` and the template silently passes — indistinguishable
-from a safe one. Needs a per-template "ACL requested but not obtained" marker in
-the collector + model so detectors can note it.
+Fixed in PR #9: `_DANGEROUS_TEMPLATE_CONTROL` now includes `writepropertyall`
+(blanket WriteProperty). Collector emits `WritePropertyAll` for zero-GUID
+ObjectType on WriteProperty ACEs.
+
+## [RESOLVED] No per-template signal when a template's DACL was unreadable
+
+Fixed in PR #10: `CertTemplate.acl_obtained` field + `detect_template_acl_gaps`
+detector + collector `acl_obtained` marker. ESC1/2/3/4/13 skip templates where
+`acl_obtained` is False; `TEMPLATE_ACL_UNREADABLE` notes the gap.
 
 ## [LOW] ESC1/2/3 do not consider `published_by`
 
