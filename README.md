@@ -106,19 +106,22 @@ adcs-lens doctor C:\AdcsExport --json     # stable JSON envelope
 ```
 
 > Status: the deterministic core is built and tested (ingest → `doctor`) with
-> the **ESC1**, **ESC2**, **ESC3**, **ESC4**, **ESC6**, **ESC7**, **ESC9** and
-> infrastructure cert/CRL-expiry detectors.
+> **ESC1**, **ESC2**, **ESC3**, **ESC4**, **ESC6**, **ESC7**, **ESC9**, **ESC11**,
+> **ESC13** and infrastructure cert/CRL-expiry detectors. Per-template
+> ACL-gap detection (`TEMPLATE_ACL_UNREADABLE`) is also built.
 > The read-only PowerShell **collector** (`scripts/Export-AdcsEstate.ps1`) is
-> built and now captures **template** security descriptors (their DACLs → ACEs),
-> so ESC1 evaluates on a real export. Validated end-to-end against a live
-> enterprise CA. CA-object and PKI-container ACLs (for ESC4/5/7) are the
-> remaining Phase 1b tail. The synthetic fixture generator
-> (`tests/fixtures/build_fixture.py`) exercises the full pipeline end-to-end.
+> built and validated end-to-end against a live enterprise CA. The synthetic
+> fixture generator (`tests/fixtures/build_fixture.py`) exercises the full
+> pipeline end-to-end. ESC5, ESC8, ESC10, ESC14, and ESC15 detectors are
+> planned but not yet built (see open work items).
 
 ## Status
 
-Core built (Plan 001 Phases 0, 2, 3); the collector (Phase 1) and the full ESC
-suite (Plan 002) are pending. Foundational docs:
+Core built (Plan 001 Phases 0, 1, 2, 3) with ESC1/2/3/4/6/7/9/11/13 detectors
+and infrastructure cert/CRL-expiry checks. The collector is validated against a
+live enterprise CA. Remaining: ESC5 (PKI container ACLs), ESC8 (NTLM relay
+enabling config), ESC10/ESC14 (DC cert mapping), and ESC15 (EKUwu). Foundational
+docs:
 - [`docs/threat-model.md`](docs/threat-model.md) — the ESC + hygiene catalogue
   with the static-detectability boundary. **Start here.**
 - [`AGENTS.md`](AGENTS.md) — conventions and hard rules.
