@@ -21,14 +21,20 @@ placeholders:
 ## Pre-publication checklist
 
 - [x] No real CA names, domain names, SIDs, OIDs, or template names in committed
-      source, tests, fixtures, plans, or docs.
-- [x] **Git history scrubbed** (2026-06-16). Earlier commits leaked a real CA
-      hostname and AD domain; the repo was rewritten with `git filter-repo`
-      (placeholder substitution) and **deleted + recreated** on GitHub to purge
-      the retained `refs/pull/*` refs as well. Every commit reachable from
-      `main` is now clean; re-verify by grepping all blobs
-      (`git rev-list --all`) for the former internal CA hostname and AD-domain
-      tokens — only this checklist entry should describe them, never name them.
+      source, tests, fixtures, plans, or docs — **HEAD only** (working tree).
+      Sanitized 2026-06-20: the real issuing-CA common name leaked into two
+      committed session reflections; replaced with the `ad-LABCA01` placeholder
+      in the working tree. Re-verify before any flip by grepping all tracked
+      files for the internal CA hostname / common-name / AD-domain tokens (do
+      not hardcode them here) — only the intentional `hraedon` GitHub identity
+      should remain.
+- [ ] **Git history clean.** The 2026-06-16 `filter-repo` + repo-recreate scrub
+      caught the CA *hostname* and AD *domain* but missed the CA *common name*,
+      which two reflections committed *after* the scrub then re-introduced. The
+      2026-06-20 fix above only cleans HEAD; the token still lives in history.
+      **Blocks the public flip** — needs another `filter-repo` pass (and, since
+      the repo was already pushed, the delete+recreate remedy) before going
+      public. Tracked as a work item (WI-010).
 - [x] `.gitignore` rejects `samples/` and local environment artifacts.
 - [x] CI is green on Python 3.12 and 3.13.
 - [x] Architecture guard (`tests/test_architecture.py`) passes.
