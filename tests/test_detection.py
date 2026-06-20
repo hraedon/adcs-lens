@@ -12,6 +12,7 @@ from adcs_lens.detection import (
     detect_esc5,
     detect_esc6,
     detect_esc7,
+    detect_esc8,
     detect_esc9,
     detect_esc11,
     detect_esc13,
@@ -30,6 +31,9 @@ from adcs_lens.model import (
     CertTemplate,
     Crl,
     CrlTier,
+    EndpointKind,
+    EnrollmentEndpoint,
+    EpaPolicy,
     Estate,
     IssuanceOid,
     Manifest,
@@ -120,6 +124,27 @@ def _pki_acl(
     return PkiObjectAcl(object_dn=dn, kind=kind, security=security)
 
 
+def _endpoint(
+    kind: EndpointKind = EndpointKind.WEB_ENROLLMENT,
+    *,
+    name: str = "/CertSrv",
+    transports: tuple[str, ...] = ("http", "https"),
+    ssl_required: bool = False,
+    windows_auth: bool = True,
+    auth_providers: tuple[str, ...] = ("negotiate", "ntlm"),
+    epa: EpaPolicy = EpaPolicy.NONE,
+) -> EnrollmentEndpoint:
+    return EnrollmentEndpoint(
+        kind=kind,
+        name=name,
+        transports=frozenset(transports),
+        ssl_required=ssl_required,
+        windows_auth=windows_auth,
+        auth_providers=frozenset(auth_providers),
+        epa=epa,
+    )
+
+
 def _estate(
     *,
     cas: tuple[CertAuthority, ...] = (),
@@ -127,6 +152,7 @@ def _estate(
     acls: tuple[PkiObjectAcl, ...] = (),
     crls: tuple[Crl, ...] = (),
     oids: tuple[IssuanceOid, ...] = (),
+    endpoints: tuple[EnrollmentEndpoint, ...] = (),
     certs_parsed: bool = True,
     skipped_passes: tuple[str, ...] = (),
 ) -> Estate:
@@ -139,7 +165,13 @@ def _estate(
         certs_parsed=certs_parsed,
     )
     return Estate(
-        cas=cas, templates=templates, acls=acls, oids=oids, crls=crls, manifest=manifest
+        cas=cas,
+        templates=templates,
+        acls=acls,
+        oids=oids,
+        crls=crls,
+        endpoints=endpoints,
+        manifest=manifest,
     )
 
 
@@ -808,6 +840,104 @@ def test_run_all_sorted_worst_first() -> None:
     severities = [f.severity for f in findings]
     assert severities == sorted(severities)
     assert findings[0].severity == Severity.CRITICAL
+
+
+# --- ESC8 -----------------------------------------------------------------
+
+
+def test_esc8_web_enrollment_http_ntlm_is_high() -> None:
+    # /certsrv over HTTP with NTLM and no EPA — the textbook relay case.
+    estate = _estate(endpoints=(_endpoint(),))
+    findings = detect_esc8(estate)
+    assert len(findings) == 1
+    assert findings[0].check == "ESC8"
+    assert findings[0].severity == Severity.HIGH
+    assert "cleartext HTTP" in findings[0].detail
+
+
+def test_esc8_https_only_no_epa_negotiate_is_medium() -> None:
+    # HTTPS-only, Negotiate (no explicit NTLM), EPA off -> weaker (MEDIUM).
+    estate = _estate(
+        endpoints=(
+            _endpoint(
+                transports=("https",),
+                ssl_required=True,
+                auth_providers=("negotiate",),
+                epa=EpaPolicy.NONE,
+            ),
+        )
+    )
+    findings = detect_esc8(estate)
+    assert len(findings) == 1
+    assert findings[0].severity == Severity.MEDIUM
+
+
+def test_esc8_https_only_explicit_ntlm_no_epa_is_high() -> None:
+    estate = _estate(
+        endpoints=(
+            _endpoint(
+                transports=("https",),
+                ssl_required=True,
+                auth_providers=("negotiate", "ntlm"),
+                epa=EpaPolicy.NONE,
+            ),
+        )
+    )
+    assert detect_esc8(estate)[0].severity == Severity.HIGH
+
+
+def test_esc8_mitigated_when_epa_required_and_https_only() -> None:
+    estate = _estate(
+        endpoints=(
+            _endpoint(transports=("https",), ssl_required=True, epa=EpaPolicy.REQUIRE),
+        )
+    )
+    assert detect_esc8(estate) == []
+
+
+def test_esc8_http_open_flagged_even_with_epa_required() -> None:
+    # EPA Require does not help if the endpoint is still reachable over HTTP.
+    estate = _estate(endpoints=(_endpoint(epa=EpaPolicy.REQUIRE),))
+    assert detect_esc8(estate)[0].severity == Severity.HIGH
+
+
+def test_esc8_kerberos_only_not_flagged() -> None:
+    estate = _estate(endpoints=(_endpoint(auth_providers=("kerberos",)),))
+    assert detect_esc8(estate) == []
+
+
+def test_esc8_no_windows_auth_not_flagged() -> None:
+    estate = _estate(endpoints=(_endpoint(windows_auth=False),))
+    assert detect_esc8(estate) == []
+
+
+def test_esc8_ndes_not_flagged() -> None:
+    estate = _estate(endpoints=(_endpoint(kind=EndpointKind.NDES),))
+    assert detect_esc8(estate) == []
+
+
+def test_esc8_ces_endpoint_flagged() -> None:
+    estate = _estate(endpoints=(_endpoint(kind=EndpointKind.CES, name="/CES"),))
+    findings = detect_esc8(estate)
+    assert len(findings) == 1
+    assert findings[0].subject == "/CES"
+
+
+def test_esc8_degrades_when_pass_skipped() -> None:
+    estate = _estate(endpoints=(), skipped_passes=("enrollment-endpoints",))
+    findings = detect_esc8(estate)
+    assert len(findings) == 1
+    assert findings[0].check == "ENROLLMENT_ENDPOINTS_NOT_EVALUATED"
+    assert findings[0].severity == Severity.INFO
+
+
+def test_esc8_clean_when_pass_ran_and_no_endpoints() -> None:
+    assert detect_esc8(_estate(endpoints=())) == []
+
+
+def test_run_all_includes_esc8() -> None:
+    estate = _estate(endpoints=(_endpoint(),))
+    assert "ESC8" in {f.check for f in run_all(estate)}
 
 
 # --- ESC5 -----------------------------------------------------------------

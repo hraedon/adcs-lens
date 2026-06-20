@@ -169,6 +169,33 @@ def build_export(
         [{"oid": POLICY_OID, "name": "Lab High Assurance", "group_link_sid": None}],
     )
 
+    # ESC8: Web Enrollment reachable over HTTP with NTLM and no Extended
+    # Protection (the textbook relay case); a Kerberos-only CES that must NOT
+    # flag (exercises the negative branch through the full pipeline).
+    _write_json(
+        base / "web-endpoints.json",
+        [
+            {
+                "kind": "web_enrollment",
+                "name": "/CertSrv",
+                "transports": ["http", "https"],
+                "ssl_required": False,
+                "windows_auth": True,
+                "auth_providers": ["Negotiate", "NTLM"],
+                "epa": "none",
+            },
+            {
+                "kind": "ces",
+                "name": "/LAB_CES_Kerberos",
+                "transports": ["https"],
+                "ssl_required": True,
+                "windows_auth": True,
+                "auth_providers": ["Kerberos"],
+                "epa": "require",
+            },
+        ],
+    )
+
     if with_certs:
         _write_certs(base, now=now)
 

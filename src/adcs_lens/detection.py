@@ -22,6 +22,8 @@ from adcs_lens.model import (
     CertTemplate,
     Crl,
     CrlTier,
+    EndpointKind,
+    EpaPolicy,
     Estate,
     Severity,
 )
@@ -137,6 +139,16 @@ _CA_SECURITY_PASS = "ca-security"
 
 # ESC11: RPC (ICertPassage) encrypted certificate request enforcement flag.
 _ESC11_FLAG = "IF_ENFORCEENCRYPTICERTREQUEST"
+
+# --- ESC8: NTLM relay to HTTP enrollment (Web Enrollment / CES) ---------------
+_ESC8_ENDPOINTS_PASS = "enrollment-endpoints"
+# Auth providers that permit NTLM: explicit NTLM, or Negotiate (which falls back
+# to NTLM unless it is explicitly disabled — so a Negotiate endpoint is treated
+# as NTLM-relayable).
+_NTLM_PROVIDERS = frozenset({"ntlm", "negotiate"})
+# Endpoint kinds whose Windows-auth relay path ESC8 models. NDES/SCEP uses a
+# different (challenge-based) flow, so it is collected but not flagged here.
+_ESC8_KINDS = frozenset({EndpointKind.WEB_ENROLLMENT, EndpointKind.CES})
 
 
 @dataclass(frozen=True)
@@ -567,6 +579,80 @@ def detect_esc7(estate: Estate) -> list[Finding]:
     return findings
 
 
+def detect_esc8(estate: Estate) -> list[Finding]:
+    """Flag HTTP enrollment endpoints that enable an NTLM relay to certificates.
+
+    ESC8: a Windows-authenticated enrollment endpoint (Web Enrollment ``/certsrv``
+    or CES) that accepts NTLM without Extended Protection (channel binding), and/
+    or is reachable over cleartext HTTP. An attacker who coerces a privileged
+    account (e.g. a DC via PetitPotam) can relay its NTLM authentication to the
+    endpoint and obtain a certificate *as that account*. We flag the enabling
+    configuration; the relay itself is out of scope and never confirmed here.
+
+    Mitigated (not flagged) when Extended Protection is *required* and the
+    endpoint is HTTPS-only. Kerberos-only endpoints (no NTLM/Negotiate) are not
+    relayable and are skipped. Degrades to a note when the endpoint pass was not
+    collected.
+    """
+    if _ESC8_ENDPOINTS_PASS in estate.manifest.skipped_passes:
+        return [
+            Finding(
+                check="ENROLLMENT_ENDPOINTS_NOT_EVALUATED",
+                severity=Severity.INFO,
+                title="HTTP enrollment endpoints not evaluated",
+                subject="(estate)",
+                detail=(
+                    "The export did not include the enrollment-endpoint pass, so ESC8 "
+                    "(NTLM relay to Web Enrollment / CES) was skipped. Re-run a "
+                    "collector that captures IIS enrollment endpoints on the CA host."
+                ),
+                source="collector-manifest.json: skipped_passes contains 'enrollment-endpoints'",
+            )
+        ]
+    findings: list[Finding] = []
+    for ep in estate.endpoints:
+        if ep.kind not in _ESC8_KINDS:
+            continue
+        if not ep.windows_auth:
+            continue
+        if not (ep.auth_providers & _NTLM_PROVIDERS):
+            continue  # Kerberos-only — not NTLM-relayable
+        http_open = "http" in ep.transports and not ep.ssl_required
+        epa_required = ep.epa is EpaPolicy.REQUIRE
+        if epa_required and not http_open:
+            continue  # channel binding enforced + HTTPS-only -> mitigated
+        conditions: list[str] = []
+        if http_open:
+            conditions.append("it is reachable over cleartext HTTP")
+        if not epa_required:
+            conditions.append(f"Extended Protection is '{ep.epa.value}' (not Require)")
+        explicit_ntlm = "ntlm" in ep.auth_providers
+        # Cleartext HTTP or an explicit NTLM provider is the textbook relay case;
+        # an HTTPS-only Negotiate endpoint missing EPA is weaker (MEDIUM).
+        severity = Severity.HIGH if (http_open or explicit_ntlm) else Severity.MEDIUM
+        findings.append(
+            Finding(
+                check="ESC8",
+                severity=severity,
+                title="HTTP enrollment endpoint enables NTLM relay to certificates",
+                subject=ep.name or ep.kind.value,
+                detail=(
+                    f"The {ep.kind.value} endpoint accepts NTLM authentication and "
+                    f"{' and '.join(conditions)}. An attacker who coerces a privileged "
+                    "account can relay its NTLM authentication here and enroll a "
+                    "certificate as that account. The relay itself is NOT confirmed by "
+                    "this read-only check. Require Extended Protection (channel "
+                    "binding), enforce HTTPS-only, and prefer Kerberos / disable NTLM."
+                ),
+                source=(
+                    f"IIS enrollment endpoint '{ep.name or ep.kind.value}': "
+                    "bindings + windowsAuthentication + extendedProtection"
+                ),
+            )
+        )
+    return findings
+
+
 def detect_esc9(estate: Estate) -> list[Finding]:
     """Flag templates with CT_FLAG_NO_SECURITY_EXTENSION set.
 
@@ -885,6 +971,7 @@ def run_all(
         *detect_esc5(estate),
         *detect_esc6(estate),
         *detect_esc7(estate),
+        *detect_esc8(estate),
         *detect_esc9(estate),
         *detect_template_acl_gaps(estate),
         *detect_esc11(estate),

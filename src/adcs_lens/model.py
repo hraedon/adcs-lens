@@ -69,6 +69,23 @@ class AclKind(StrEnum):
     CA_OBJECT = "ca_object"
 
 
+class EndpointKind(StrEnum):
+    """An HTTP/RPC enrollment endpoint that AD CS can expose (ESC8 surface)."""
+
+    WEB_ENROLLMENT = "web_enrollment"  # /certsrv — the classic NTLM-relay target
+    CES = "ces"  # Certificate Enrollment Web Service
+    NDES = "ndes"  # Network Device Enrollment (SCEP)
+
+
+class EpaPolicy(StrEnum):
+    """IIS Extended Protection for Authentication (channel-binding) policy."""
+
+    NONE = "none"  # tokenChecking Off — relay not mitigated
+    ALLOW = "allow"  # honored if the client offers it, but not required
+    REQUIRE = "require"  # enforced — the ESC8 mitigation
+    UNKNOWN = "unknown"  # endpoint present but EPA state not read
+
+
 @dataclass(frozen=True)
 class AceEntry:
     """One access-control entry on a PKI object."""
@@ -149,6 +166,26 @@ class PkiObjectAcl:
 
 
 @dataclass(frozen=True)
+class EnrollmentEndpoint:
+    """An HTTP/RPC enrollment endpoint and its relay-relevant configuration.
+
+    ESC8 is the *enabling condition* for an NTLM relay to certificate enrollment:
+    a Windows-authenticated HTTP enrollment endpoint that accepts NTLM, without
+    Extended Protection (channel binding) and/or reachable over cleartext HTTP.
+    The relay itself is out of scope; these fields are the statically-readable
+    prerequisites the detector reasons over.
+    """
+
+    kind: EndpointKind
+    name: str  # the IIS application / endpoint name (e.g. "/CertSrv")
+    transports: frozenset[str]  # {"http", "https"} the hosting site binds
+    ssl_required: bool  # the app requires HTTPS (so HTTP is blocked for it)
+    windows_auth: bool  # Windows Authentication is enabled on the endpoint
+    auth_providers: frozenset[str]  # lower-cased: {"negotiate", "ntlm", ...}
+    epa: EpaPolicy
+
+
+@dataclass(frozen=True)
 class IssuanceOid:
     """An enterprise issuance-policy OID and any group it is linked to (ESC13)."""
 
@@ -180,4 +217,5 @@ class Estate:
     acls: tuple[PkiObjectAcl, ...]
     oids: tuple[IssuanceOid, ...]
     crls: tuple[Crl, ...]
+    endpoints: tuple[EnrollmentEndpoint, ...]
     manifest: Manifest
