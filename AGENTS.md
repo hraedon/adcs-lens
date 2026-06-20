@@ -80,12 +80,14 @@ exports (WI-001), never from a standing connection.
 ## Status
 
 The deterministic core is built and tested (ingest → `doctor`, ESC1 + ESC2 +
-ESC3 + ESC4 + ESC6 + ESC7 + ESC9 + ESC11 + ESC13 + infra lifecycle detectors,
-architecture guard), plus a per-template unreadable-DACL signal
+ESC3 + ESC4 + ESC5 + ESC6 + ESC7 + ESC9 + ESC11 + ESC13 + infra lifecycle
+detectors, architecture guard), plus a per-template unreadable-DACL signal
 (`TEMPLATE_ACL_UNREADABLE`). The read-only PowerShell collector
 (`scripts/Export-AdcsEstate.ps1`) captures CA config, templates (with their
 DACLs → ACEs, and an `acl_obtained` marker), CA role security
-(`CA\Security` → ESC7), and issuance OIDs; validated end-to-end against a live
-enterprise CA. Remaining: PKI-container ACL collection (the pki-acls pass, for
-ESC5 — needs a live collector run) and ESC15; ESC11/ESC13 are negative-validated
-on the real CA but still await positive (vulnerable-config) validation there.
+(`CA\Security` → ESC7), PKI-object ACLs (NTAuth / AIA / CDP / PKS containers +
+CA objects → ESC5), and issuance OIDs; validated end-to-end against a live
+enterprise CA. Remaining: ESC8, ESC10, ESC14, ESC15. ESC5 is negative-validated
+on the real CA (clean estate → no findings) with positive validation via the
+synthetic fixture; ESC11/ESC13 are negative-validated on the real CA but still
+await positive (vulnerable-config) validation there.

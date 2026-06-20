@@ -150,3 +150,18 @@ def test_severity_enum_round_trips(json_export: Path) -> None:
     # The fixture does not emit acl_obtained; it must default to True so no
     # spurious per-template ACL-gap note appears on backward-compat data.
     assert all(f.check != "TEMPLATE_ACL_UNREADABLE" for f in findings)
+
+
+def test_esc5_detected_end_to_end(json_export: Path) -> None:
+    # The fixture carries a benign scoped-WriteProperty NTAuth ACE (no finding)
+    # and a low-priv WriteDacl on the PKS container (ESC5). Exercise the full
+    # ingest -> PkiObjectAcl -> detect_esc5 pipeline, not just hand-built objects.
+    from adcs_lens.detection import run_all
+    estate = ingest(json_export)
+    assert len(estate.acls) == 2
+    esc5 = [f for f in run_all(estate) if f.check == "ESC5"]
+    assert len(esc5) == 1
+    assert esc5[0].severity == Severity.HIGH
+    assert "Public Key Services" in esc5[0].subject
+    # The pass ran, so there must be no degrade note.
+    assert all(f.check != "PKI_ACL_NOT_EVALUATED" for f in run_all(estate))

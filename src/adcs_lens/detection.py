@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from adcs_lens.model import (
     AceEntry,
     AceType,
+    AclKind,
     CaKind,
     CertKind,
     CertTemplate,
@@ -90,6 +91,45 @@ _DANGEROUS_TEMPLATE_CONTROL = frozenset(
 # listed in skipped_passes.
 _TEMPLATE_SECURITY_PASS = "template-security"
 
+# --- ESC5: writable ACL on PKI container / CA objects ------------------------
+# Same object-wide control rights as ESC4 (they let a principal rewrite the
+# object's DACL or contents), here applied to the Public Key Services containers
+# and CA objects rather than to a template.
+_DANGEROUS_OBJECT_CONTROL = _DANGEROUS_TEMPLATE_CONTROL
+# Manifest pass whose absence means PKI-object ACLs were not collected.
+_PKI_ACLS_PASS = "pki-acls"
+# Per-object-kind severity + the escalation a write on it enables. NTAuth and CA
+# objects are full-trust primitives (CRITICAL); the distribution containers let
+# an attacker tamper with chain/revocation (HIGH).
+_ESC5_IMPACT: dict[AclKind, tuple[Severity, str]] = {
+    AclKind.NTAUTH: (
+        Severity.CRITICAL,
+        "the NTAuthCertificates object — adding a CA certificate here makes every "
+        "certificate that CA issues trusted for AD authentication, forging any "
+        "principal estate-wide",
+    ),
+    AclKind.CA_OBJECT: (
+        Severity.CRITICAL,
+        "a CA object — control lets an attacker alter the CA's published templates "
+        "and enrollment configuration",
+    ),
+    AclKind.PKS_CONTAINER: (
+        Severity.HIGH,
+        "a Public Key Services container — control lets an attacker create child "
+        "objects such as a rogue template or enrollment service",
+    ),
+    AclKind.AIA: (
+        Severity.HIGH,
+        "the AIA container — control lets an attacker tamper with the published CA "
+        "chain (authority information access)",
+    ),
+    AclKind.CDP: (
+        Severity.HIGH,
+        "the CDP container — control lets an attacker tamper with CRL distribution, "
+        "undermining revocation",
+    ),
+}
+
 # --- ESC7: CA role permissions held by low-priv principals -------------------
 _CA_MANAGE_CA = "manageca"  # CA_ACCESS_ADMIN — full CA control
 _CA_MANAGE_CERTS = "managecertificates"  # CA_ACCESS_OFFICER — issue/approve/revoke
@@ -152,12 +192,12 @@ def _can_authenticate(template: CertTemplate) -> bool:
     return any(eku in _AUTH_EKUS for eku in template.ekus)
 
 
-def _low_priv_allow_aces(
-    template: CertTemplate, rights: frozenset[str]
+def _low_priv_allow_aces_in(
+    security: tuple[AceEntry, ...], rights: frozenset[str]
 ) -> list[AceEntry]:
-    """Allow-ACEs granting any of *rights* (lower-cased match) to a low-priv trustee."""
+    """Allow-ACEs in *security* granting any of *rights* (lower-cased) to low-priv."""
     out: list[AceEntry] = []
-    for ace in template.security:
+    for ace in security:
         if ace.ace_type is not AceType.ALLOW:
             continue
         if not is_low_priv_trustee(ace.trustee_sid):
@@ -165,6 +205,13 @@ def _low_priv_allow_aces(
         if any(r.strip().lower() in rights for r in ace.rights):
             out.append(ace)
     return out
+
+
+def _low_priv_allow_aces(
+    template: CertTemplate, rights: frozenset[str]
+) -> list[AceEntry]:
+    """Allow-ACEs granting any of *rights* (lower-cased match) to a low-priv trustee."""
+    return _low_priv_allow_aces_in(template.security, rights)
 
 
 def _low_priv_enrollers(template: CertTemplate) -> list[AceEntry]:
@@ -381,6 +428,72 @@ def detect_esc4(estate: Estate) -> list[Finding]:
                     "an ESC1 path. Remove the delegated control."
                 ),
                 source=f"template '{tmpl.name}': nTSecurityDescriptor DACL",
+            )
+        )
+    return findings
+
+
+def detect_esc5(estate: Estate) -> list[Finding]:
+    """Flag PKI container / CA objects writable by a low-privilege principal.
+
+    ESC5: a low-priv trustee holds an object-wide control right (GenericAll,
+    GenericWrite, WriteDacl, WriteOwner, or a *blanket* WriteProperty) on a
+    Public Key Services object — NTAuthCertificates, a CA object, the AIA/CDP
+    containers, or a PKS container. Each grants a distinct escalation: writing
+    NTAuth publishes a rogue trusted CA; writing a CA object reconfigures
+    issuance; writing AIA/CDP tampers with chain/revocation. We flag the standing
+    control right; we never modify the object.
+
+    Degrades to a note when the PKI-ACL pass was not collected (``pki-acls`` in
+    ``skipped_passes``) so the absence of findings is not mistaken for a clean
+    result. Property-*scoped* WriteProperty is not flagged (mirrors ESC4): only
+    blanket object-control rights are treated as control.
+    """
+    if _PKI_ACLS_PASS in estate.manifest.skipped_passes:
+        return [
+            Finding(
+                check="PKI_ACL_NOT_EVALUATED",
+                severity=Severity.INFO,
+                title="PKI object permissions not evaluated",
+                subject="(estate)",
+                detail=(
+                    "The export did not include PKI-object security descriptors, so "
+                    "ESC5 (writable NTAuth / CA object / PKS container) was skipped. "
+                    "Re-run a collector that captures the pki-acls pass."
+                ),
+                source="collector-manifest.json: skipped_passes contains 'pki-acls'",
+            )
+        ]
+    findings: list[Finding] = []
+    for obj in estate.acls:
+        controllers = _low_priv_allow_aces_in(obj.security, _DANGEROUS_OBJECT_CONTROL)
+        if not controllers:
+            continue
+        severity, impact = _ESC5_IMPACT.get(
+            obj.kind,
+            (Severity.HIGH, "a Public Key Services object"),
+        )
+        who = ", ".join(sorted({a.trustee_name or a.trustee_sid for a in controllers}))
+        rights = ", ".join(
+            sorted(
+                {
+                    r
+                    for a in controllers
+                    for r in a.rights
+                    if r.strip().lower() in _DANGEROUS_OBJECT_CONTROL
+                }
+            )
+        )
+        findings.append(
+            Finding(
+                check="ESC5",
+                severity=severity,
+                title="PKI object is writable by a low-privilege principal",
+                subject=obj.object_dn or obj.kind.value,
+                detail=(
+                    f"{who} hold {rights} on {impact}. Remove the delegated control."
+                ),
+                source=f"{obj.object_dn or obj.kind.value}: nTSecurityDescriptor DACL",
             )
         )
     return findings
@@ -769,6 +882,7 @@ def run_all(
         *detect_esc2(estate),
         *detect_esc3(estate),
         *detect_esc4(estate),
+        *detect_esc5(estate),
         *detect_esc6(estate),
         *detect_esc7(estate),
         *detect_esc9(estate),

@@ -29,7 +29,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$COLLECTOR_VERSION = '0.1.0'
+$COLLECTOR_VERSION = '0.2.0'
 
 function _b64([string]$s) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($s)) }
 $LdapUser = _b64 $LdapUserB64
@@ -134,6 +134,33 @@ function _parseAces([byte[]]$sdBytes) {
       rights       = (@($rights))
       ace_type     = [string]$a.AccessControlType   # 'Allow' | 'Deny'
     }
+  }
+  ,$out
+}
+
+# --- PKI object DACLs (ESC5) ------------------------------------------------
+# Read the nTSecurityDescriptor on a single object (Base scope) and tokenise its
+# ACEs via _parseAces. Pure LDAP against the Configuration NC — no certutil, so
+# this pass runs from any domain member with the explicit bind creds.
+function _objAcl([string]$dn, [string]$kind) {
+  $de = New-Object DirectoryServices.DirectoryEntry("LDAP://$dn", $LdapUser, $LdapPass)
+  $s = New-Object DirectoryServices.DirectorySearcher($de)
+  $s.SearchScope = 'Base'; $s.Filter = '(objectClass=*)'
+  $s.SecurityMasks = [DirectoryServices.SecurityMasks]'Dacl'
+  $r = $null
+  try { $r = $s.FindOne() } catch { return $null }   # object absent / no read
+  if (-not $r) { return $null }
+  $sdb = if ($r.Properties['ntsecuritydescriptor'].Count) { [byte[]]$r.Properties['ntsecuritydescriptor'][0] } else { $null }
+  [ordered]@{ object_dn = $dn; kind = $kind; security = (_parseAces $sdb) }
+}
+# Enumerate child objects under a container and tokenise each one's DACL.
+function _childAcls([string]$containerDn, [string]$filter, [string]$kind) {
+  $out = @()
+  $root = New-Object DirectoryServices.DirectoryEntry("LDAP://$containerDn", $LdapUser, $LdapPass)
+  foreach ($r in (_search $root $filter)) {
+    $dn  = [string]$r.Properties['distinguishedname'][0]
+    $sdb = if ($r.Properties['ntsecuritydescriptor'].Count) { [byte[]]$r.Properties['ntsecuritydescriptor'][0] } else { $null }
+    $out += [ordered]@{ object_dn = $dn; kind = $kind; security = (_parseAces $sdb) }
   }
   ,$out
 }
@@ -249,6 +276,27 @@ foreach ($r in (_search $oidRoot '(objectClass=msPKI-Enterprise-Oid)')) {
   }
 }
 
+# --- PKI object ACLs (ESC5) --------------------------------------------------
+# Capture DACLs on the Public Key Services containers + CA objects. A low-priv
+# trustee with object-control rights (WriteDacl/WriteOwner/GenericWrite/
+# GenericAll) on any of these is the ESC5 escalation primitive.
+$cfgNc = (New-Object DirectoryServices.DirectoryEntry("LDAP://RootDSE", $LdapUser, $LdapPass)).configurationNamingContext
+$pksDn = "CN=Public Key Services,CN=Services,$cfgNc"
+$pkiAcls = @()
+foreach ($pair in @(
+    @($pksDn,                                        'pks_container'),
+    @("CN=NTAuthCertificates,$pksDn",                'ntauth'),
+    @("CN=AIA,$pksDn",                               'aia'),
+    @("CN=CDP,$pksDn",                               'cdp'),
+    @("CN=Certification Authorities,$pksDn",         'pks_container'),
+    @("CN=Enrollment Services,$pksDn",               'pks_container'))) {
+  $a = _objAcl $pair[0] $pair[1]
+  if ($a) { $pkiAcls += $a }
+}
+# Individual CA objects: trusted roots + issuing enrollment services.
+$pkiAcls += _childAcls "CN=Certification Authorities,$pksDn" '(objectClass=certificationAuthority)' 'ca_object'
+$pkiAcls += _childAcls "CN=Enrollment Services,$pksDn"       '(objectClass=pKIEnrollmentService)'   'ca_object'
+
 # --- CA role security (ESC7) -------------------------------------------------
 # Keyed by the CA name used in ca-config.json so ingest joins them to the CA.
 $caSecurity = [ordered]@{}
@@ -260,17 +308,17 @@ $manifest = [ordered]@{
   collected_at      = (Get-Date).ToUniversalTime().ToString('o')
   host              = [string](hostname)
   domain            = ((New-Object DirectoryServices.DirectoryEntry("LDAP://RootDSE", $LdapUser, $LdapPass)).defaultNamingContext)
-  skipped_passes    = @('pki-acls', 'certs')  # remaining Phase 1b / [certs]
+  skipped_passes    = @('certs')  # cert/CRL DER lifecycle ([certs] extra)
 }
 
 # --- write the export (force arrays so single items don't collapse) ---------
 _writeJson @($caConfig)  'ca-config.json'
 _writeJson @($templates) 'templates.json'
 _writeJson @($oids)      'oid-objects.json'
-_writeJson @()           'pki-acls.json'
+_writeJson @($pkiAcls)   'pki-acls.json'
 _writeJson $enrollmentServices 'enrollment-services.json'
 _writeJson $caSecurity   'ca-security.json'
 _writeJson $manifest     'collector-manifest.json'
 
-Write-Output ("OK cas={0} templates={1} oids={2} editflags=[{3}] ca={4}" -f `
-  $caConfig.Count, $templates.Count, $oids.Count, ($editFlags -join ','), $caCommonName)
+Write-Output ("OK cas={0} templates={1} oids={2} pkiacls={3} editflags=[{4}] ca={5}" -f `
+  $caConfig.Count, $templates.Count, $oids.Count, $pkiAcls.Count, ($editFlags -join ','), $caCommonName)
