@@ -134,6 +134,8 @@ def build_export(
         base / "pki-acls.json",
         [
             {
+                # Benign: a *scoped* WriteProperty is not object control, so this
+                # exercises the ingest round-trip WITHOUT a false ESC5 positive.
                 "object_dn": "CN=NTAuthCertificates,...,DC=lab,DC=example,DC=com",
                 "kind": "ntauth",
                 "security": [
@@ -144,7 +146,21 @@ def build_export(
                         "ace_type": "Allow",
                     }
                 ],
-            }
+            },
+            {
+                # ESC5-positive: low-priv WriteDacl on the PKS container is
+                # object control (a path to a rogue template / enrollment service).
+                "object_dn": "CN=Public Key Services,...,DC=lab,DC=example,DC=com",
+                "kind": "pks_container",
+                "security": [
+                    {
+                        "trustee_sid": LOW_PRIV_SID,
+                        "trustee_name": "Domain Users",
+                        "rights": ["WriteDacl"],
+                        "ace_type": "Allow",
+                    }
+                ],
+            },
         ],
     )
 

@@ -9,6 +9,7 @@ from adcs_lens.detection import (
     detect_esc2,
     detect_esc3,
     detect_esc4,
+    detect_esc5,
     detect_esc6,
     detect_esc7,
     detect_esc9,
@@ -21,6 +22,7 @@ from adcs_lens.detection import (
 from adcs_lens.model import (
     AceEntry,
     AceType,
+    AclKind,
     CaKind,
     CertAuthority,
     CertKind,
@@ -31,6 +33,7 @@ from adcs_lens.model import (
     Estate,
     IssuanceOid,
     Manifest,
+    PkiObjectAcl,
     Severity,
 )
 
@@ -102,10 +105,26 @@ def _ca(
     )
 
 
+def _ctrl_ace(
+    sid: str = LOW_PRIV_SID, *, right: str = "WriteDacl", ace_type: AceType = AceType.ALLOW
+) -> AceEntry:
+    return AceEntry(trustee_sid=sid, trustee_name="trustee", rights=(right,), ace_type=ace_type)
+
+
+def _pki_acl(
+    kind: AclKind,
+    *,
+    dn: str = "CN=Obj,CN=Public Key Services,CN=Services,CN=Configuration,DC=x",
+    security: tuple[AceEntry, ...] = (),
+) -> PkiObjectAcl:
+    return PkiObjectAcl(object_dn=dn, kind=kind, security=security)
+
+
 def _estate(
     *,
     cas: tuple[CertAuthority, ...] = (),
     templates: tuple[CertTemplate, ...] = (),
+    acls: tuple[PkiObjectAcl, ...] = (),
     crls: tuple[Crl, ...] = (),
     oids: tuple[IssuanceOid, ...] = (),
     certs_parsed: bool = True,
@@ -120,7 +139,7 @@ def _estate(
         certs_parsed=certs_parsed,
     )
     return Estate(
-        cas=cas, templates=templates, acls=(), oids=oids, crls=crls, manifest=manifest
+        cas=cas, templates=templates, acls=acls, oids=oids, crls=crls, manifest=manifest
     )
 
 
@@ -789,6 +808,111 @@ def test_run_all_sorted_worst_first() -> None:
     severities = [f.severity for f in findings]
     assert severities == sorted(severities)
     assert findings[0].severity == Severity.CRITICAL
+
+
+# --- ESC5 -----------------------------------------------------------------
+
+
+def test_esc5_ntauth_writable_is_critical() -> None:
+    estate = _estate(
+        acls=(_pki_acl(AclKind.NTAUTH, security=(_ctrl_ace(right="WriteDacl"),)),),
+    )
+    findings = detect_esc5(estate)
+    assert len(findings) == 1
+    assert findings[0].check == "ESC5"
+    assert findings[0].severity == Severity.CRITICAL
+    assert "NTAuthCertificates" in findings[0].detail
+    assert "WriteDacl" in findings[0].detail
+
+
+def test_esc5_ca_object_writable_is_critical() -> None:
+    estate = _estate(acls=(_pki_acl(AclKind.CA_OBJECT, security=(_ctrl_ace(right="GenericAll"),)),))
+    findings = detect_esc5(estate)
+    assert len(findings) == 1
+    assert findings[0].severity == Severity.CRITICAL
+
+
+def test_esc5_container_writable_is_high() -> None:
+    for kind in (AclKind.PKS_CONTAINER, AclKind.AIA, AclKind.CDP):
+        estate = _estate(acls=(_pki_acl(kind, security=(_ctrl_ace(right="GenericWrite"),)),))
+        findings = detect_esc5(estate)
+        assert len(findings) == 1, kind
+        assert findings[0].severity == Severity.HIGH, kind
+
+
+def test_esc5_not_flagged_for_high_priv_trustee() -> None:
+    estate = _estate(
+        acls=(_pki_acl(AclKind.NTAUTH, security=(_ctrl_ace(HIGH_PRIV_SID, right="WriteDacl"),)),),
+    )
+    assert detect_esc5(estate) == []
+
+
+def test_esc5_not_flagged_for_read_or_enroll_rights() -> None:
+    estate = _estate(
+        acls=(
+            _pki_acl(
+                AclKind.NTAUTH,
+                security=(_ctrl_ace(right="ReadProperty"), _ctrl_ace(right="Enroll")),
+            ),
+        ),
+    )
+    assert detect_esc5(estate) == []
+
+
+def test_esc5_not_flagged_for_scoped_writeproperty() -> None:
+    # A property-scoped WriteProperty (non-blanket) is not treated as control,
+    # mirroring ESC4; only WritePropertyAll / Generic* / WriteDacl / WriteOwner.
+    estate = _estate(
+        acls=(_pki_acl(AclKind.NTAUTH, security=(_ctrl_ace(right="WriteProperty"),)),),
+    )
+    assert detect_esc5(estate) == []
+
+
+def test_esc5_writepropertyall_is_flagged() -> None:
+    estate = _estate(
+        acls=(_pki_acl(AclKind.CA_OBJECT, security=(_ctrl_ace(right="WritePropertyAll"),)),),
+    )
+    assert len(detect_esc5(estate)) == 1
+
+
+def test_esc5_deny_ace_ignored() -> None:
+    estate = _estate(
+        acls=(
+            _pki_acl(
+                AclKind.NTAUTH,
+                security=(_ctrl_ace(right="WriteDacl", ace_type=AceType.DENY),),
+            ),
+        ),
+    )
+    assert detect_esc5(estate) == []
+
+
+def test_esc5_clean_when_pass_ran_and_no_dangerous_aces() -> None:
+    estate = _estate(acls=(_pki_acl(AclKind.NTAUTH, security=(_ctrl_ace(right="ReadProperty"),)),))
+    assert detect_esc5(estate) == []
+
+
+def test_esc5_degrades_when_pass_skipped() -> None:
+    estate = _estate(acls=(), skipped_passes=("pki-acls",))
+    findings = detect_esc5(estate)
+    assert len(findings) == 1
+    assert findings[0].check == "PKI_ACL_NOT_EVALUATED"
+    assert findings[0].severity == Severity.INFO
+
+
+def test_esc5_subject_falls_back_to_kind_when_dn_empty() -> None:
+    estate = _estate(
+        acls=(_pki_acl(AclKind.NTAUTH, dn="", security=(_ctrl_ace(right="WriteOwner"),)),),
+    )
+    findings = detect_esc5(estate)
+    assert len(findings) == 1
+    assert findings[0].subject == AclKind.NTAUTH.value
+
+
+def test_run_all_includes_esc5() -> None:
+    estate = _estate(acls=(_pki_acl(AclKind.NTAUTH, security=(_ctrl_ace(right="WriteDacl"),)),))
+    checks = {f.check for f in run_all(estate)}
+    assert "ESC5" in checks
 
 
 def test_run_all_includes_esc11_and_esc13() -> None:
