@@ -95,7 +95,11 @@ function _decode([int]$value, $map) {
 
 # --- nTSecurityDescriptor -> ACEs (ESC1/ESC4/ESC5/ESC7 inputs) --------------
 # Extended-right GUIDs we care about; an all-zero ObjectType on an ExtendedRight
-# ACE means "all extended rights" (which includes Enroll).
+# ACE means "all extended rights" (which includes Enroll). The same all-zero
+# ObjectType on a WriteProperty ACE means "write *all* properties" (blanket) —
+# emitted as 'WritePropertyAll' so ESC4 can flag it (a blanket WriteProperty can
+# rewrite msPKI-Certificate-Name-Flag → ESC1). A non-zero ObjectType scopes the
+# write to one property/property-set and stays plain 'WriteProperty' (benign).
 $ENROLL_GUID     = '0e10c968-78fb-11d2-90d4-00c04f79dc55'
 $AUTOENROLL_GUID = 'a05b8cc2-17b1-4cc8-8b00-94f99c9c2cca'
 $ZERO_GUID       = '00000000-0000-0000-0000-000000000000'
@@ -117,6 +121,9 @@ function _parseAces([byte[]]$sdBytes) {
         elseif ($ot -eq $AUTOENROLL_GUID) { $rights += 'AutoEnroll' }
         elseif ($ot -eq $ZERO_GUID)       { $rights += 'AllExtendedRights' }
         else                              { $rights += 'ExtendedRight' }
+      } elseif ($flag -eq 'WriteProperty') {
+        if ($ot -eq $ZERO_GUID) { $rights += 'WritePropertyAll' }  # blanket: all properties
+        else                    { $rights += 'WriteProperty' }     # scoped to one property/set
       } else {
         $rights += $flag
       }

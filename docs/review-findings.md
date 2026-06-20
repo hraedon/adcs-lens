@@ -3,21 +3,6 @@
 Tracked items from the 2026-06-16 independent security-correctness review of the
 detection path. Resolved items are dropped from this list.
 
-## [HIGH] ESC4 misses blanket `WriteProperty` on templates
-
-`_DANGEROUS_TEMPLATE_CONTROL` (detection.py) excludes `WriteProperty` to avoid
-false positives from property-scoped ACEs. But a **blanket** WriteProperty (ACE
-`ObjectType` = zero GUID = "all properties") lets a principal rewrite
-`msPKI-Certificate-Name-Flag` to enable `ENROLLEE_SUPPLIES_SUBJECT` — a real ESC4
-→ ESC1 path that currently goes unflagged.
-
-**Fix needs all three layers + lab validation:** the collector (`_parseAces`)
-must distinguish blanket vs property-scoped WriteProperty (it currently drops the
-non-ExtendedRight `ObjectType`); the ACE model must carry that distinction; ESC4
-then flags blanket WriteProperty/GenericWrite to low-priv. Validate by granting a
-test template blanket WriteProperty to Domain Users (see
-`reference-adcs-lens-collector-access` create-template procedure).
-
 ## [MEDIUM] No per-template signal when a template's DACL was unreadable
 
 Estate-level degradation works (`template-security` in `skipped_passes` → ESC1
