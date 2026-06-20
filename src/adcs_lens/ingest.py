@@ -29,6 +29,9 @@ from adcs_lens.model import (
     CertTemplate,
     Crl,
     CrlTier,
+    EndpointKind,
+    EnrollmentEndpoint,
+    EpaPolicy,
     Estate,
     IssuanceOid,
     Manifest,
@@ -232,6 +235,24 @@ def ingest(export_dir: str | Path) -> Estate:
         for a in acls_data
     )
 
+    endpoints = tuple(
+        EnrollmentEndpoint(
+            kind=_kind(e.get("kind", ""), EndpointKind, "endpoint kind", default="web_enrollment"),
+            name=_coerce_str(e.get("name", "")),
+            transports=frozenset(
+                _coerce_str(t).lower() for t in e.get("transports", []) if _coerce_str(t)
+            ),
+            ssl_required=bool(e.get("ssl_required", False)),
+            windows_auth=bool(e.get("windows_auth", False)),
+            auth_providers=frozenset(
+                _coerce_str(p).lower() for p in e.get("auth_providers", []) if _coerce_str(p)
+            ),
+            epa=_kind(e.get("epa", "unknown"), EpaPolicy, "EPA policy", default="unknown"),
+        )
+        for e in _require_list(base, "web-endpoints.json", _load(base, "web-endpoints.json"))
+        if isinstance(e, dict)
+    )
+
     oids = tuple(
         IssuanceOid(
             oid=_coerce_str(o.get("oid", "")),
@@ -258,6 +279,7 @@ def ingest(export_dir: str | Path) -> Estate:
         acls=acls,
         oids=oids,
         crls=tuple(crls),
+        endpoints=endpoints,
         manifest=manifest,
     )
 

@@ -106,22 +106,24 @@ adcs-lens doctor C:\AdcsExport --json     # stable JSON envelope
 ```
 
 > Status: the deterministic core is built and tested (ingest → `doctor`) with
-> **ESC1**, **ESC2**, **ESC3**, **ESC4**, **ESC5**, **ESC6**, **ESC7**, **ESC9**,
-> **ESC11**, **ESC13** and infrastructure cert/CRL-expiry detectors. Per-template
-> ACL-gap detection (`TEMPLATE_ACL_UNREADABLE`) is also built.
+> **ESC1**, **ESC2**, **ESC3**, **ESC4**, **ESC5**, **ESC6**, **ESC7**, **ESC8**,
+> **ESC9**, **ESC11**, **ESC13** and infrastructure cert/CRL-expiry detectors.
+> Per-template ACL-gap detection (`TEMPLATE_ACL_UNREADABLE`) is also built.
 > The read-only PowerShell **collector** (`scripts/Export-AdcsEstate.ps1`) is
 > built and validated end-to-end against a live enterprise CA — including the
 > PKI-object ACL pass (NTAuth / AIA / CDP / PKS containers + CA objects) that
-> backs ESC5. The synthetic fixture generator (`tests/fixtures/build_fixture.py`)
-> exercises the full pipeline end-to-end. ESC8, ESC10, ESC14, and ESC15 detectors
-> are planned but not yet built (see open work items).
+> backs ESC5 and the IIS enrollment-endpoint pass (Web Enrollment / CES bindings,
+> Windows-auth, Extended Protection) that backs ESC8. The synthetic fixture
+> generator (`tests/fixtures/build_fixture.py`) exercises the full pipeline
+> end-to-end. ESC10, ESC14, and ESC15 detectors are planned but not yet built
+> (see open work items).
 
 ## Status
 
-Core built (Plan 001 Phases 0, 1, 2, 3) with ESC1/2/3/4/5/6/7/9/11/13 detectors
+Core built (Plan 001 Phases 0, 1, 2, 3) with ESC1/2/3/4/5/6/7/8/9/11/13 detectors
 and infrastructure cert/CRL-expiry checks. The collector is validated against a
-live enterprise CA. Remaining: ESC8 (NTLM relay enabling config), ESC10/ESC14
-(DC cert mapping), and ESC15 (EKUwu). Foundational docs:
+live enterprise CA. Remaining: ESC10/ESC14 (DC cert mapping) and ESC15 (EKUwu).
+Foundational docs:
 - [`docs/threat-model.md`](docs/threat-model.md) — the ESC + hygiene catalogue
   with the static-detectability boundary. **Start here.**
 - [`AGENTS.md`](AGENTS.md) — conventions and hard rules.

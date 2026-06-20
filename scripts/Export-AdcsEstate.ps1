@@ -29,7 +29,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$COLLECTOR_VERSION = '0.2.0'
+$COLLECTOR_VERSION = '0.3.0'
 
 function _b64([string]$s) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($s)) }
 $LdapUser = _b64 $LdapUserB64
@@ -302,13 +302,64 @@ $pkiAcls += _childAcls "CN=Enrollment Services,$pksDn"       '(objectClass=pKIEn
 $caSecurity = [ordered]@{}
 foreach ($ca in $caConfig) { $caSecurity[$ca.name] = (_caSecurityAces $ca.name) }
 
+# --- HTTP enrollment endpoints (ESC8) ---------------------------------------
+# IIS bindings + Windows-auth + Extended Protection on the Web Enrollment
+# (/certsrv) and CES apps. Needs WebAdministration on the host; absent off the
+# enrollment host, so the pass is skipped + noted (the detector degrades).
+$webEndpoints = @()
+$endpointsSkipped = $true
+try { Import-Module WebAdministration -ErrorAction Stop; $endpointsSkipped = $false } catch { }
+if (-not $endpointsSkipped) {
+  function _epaToken($v) {
+    switch ([string]$v) {
+      '2' { 'require' } 'Require' { 'require' }
+      '1' { 'allow' }   'Allow'   { 'allow' }
+      '0' { 'none' }    'Off' { 'none' } 'None' { 'none' } '' { 'none' }
+      default { 'unknown' }
+    }
+  }
+  function _classifyApp([string]$p) {
+    $l = $p.ToLower()
+    if ($l -match 'mscep') { return 'ndes' }            # NDES/SCEP
+    if ($l -match 'certsrv') { return 'web_enrollment' } # /certsrv
+    if ($l -match '_ces_' -or $l -match 'cep') { return 'ces' }
+    return $null
+  }
+  foreach ($site in (Get-Website)) {
+    $protos = @(); foreach ($b in $site.bindings.Collection) { if ($protos -notcontains [string]$b.protocol) { $protos += [string]$b.protocol } }
+    foreach ($app in (Get-WebApplication -Site $site.Name)) {
+      $kind = _classifyApp ([string]$app.path)
+      if (-not $kind) { continue }
+      $ps = "IIS:\Sites\$($site.Name)\" + ([string]$app.path).TrimStart('/')
+      $wa = (Get-WebConfigurationProperty -PSPath $ps -Filter 'system.webServer/security/authentication/windowsAuthentication' -Name enabled -ErrorAction SilentlyContinue).Value
+      $tc = (Get-WebConfigurationProperty -PSPath $ps -Filter 'system.webServer/security/authentication/windowsAuthentication' -Name 'extendedProtection.tokenChecking' -ErrorAction SilentlyContinue).Value
+      $ssl = [string](Get-WebConfigurationProperty -PSPath $ps -Filter 'system.webServer/security/access' -Name sslFlags -ErrorAction SilentlyContinue).Value
+      $provs = @()
+      foreach ($p in (Get-WebConfigurationProperty -PSPath $ps -Filter 'system.webServer/security/authentication/windowsAuthentication/providers' -Name Collection -ErrorAction SilentlyContinue)) {
+        if ($p.value) { $provs += ([string]$p.value).ToLower() }
+      }
+      $webEndpoints += [ordered]@{
+        kind           = $kind
+        name           = [string]$app.path
+        transports     = (@($protos))
+        ssl_required   = ($ssl -match 'Ssl')
+        windows_auth   = [bool]$wa
+        auth_providers = (@($provs))
+        epa            = (_epaToken $tc)
+      }
+    }
+  }
+}
+
 # --- manifest ----------------------------------------------------------------
+$skippedPasses = @('certs')                                   # cert/CRL DER ([certs] extra)
+if ($endpointsSkipped) { $skippedPasses += 'enrollment-endpoints' }
 $manifest = [ordered]@{
   collector_version = $COLLECTOR_VERSION
   collected_at      = (Get-Date).ToUniversalTime().ToString('o')
   host              = [string](hostname)
   domain            = ((New-Object DirectoryServices.DirectoryEntry("LDAP://RootDSE", $LdapUser, $LdapPass)).defaultNamingContext)
-  skipped_passes    = @('certs')  # cert/CRL DER lifecycle ([certs] extra)
+  skipped_passes    = (@($skippedPasses))
 }
 
 # --- write the export (force arrays so single items don't collapse) ---------
@@ -316,9 +367,10 @@ _writeJson @($caConfig)  'ca-config.json'
 _writeJson @($templates) 'templates.json'
 _writeJson @($oids)      'oid-objects.json'
 _writeJson @($pkiAcls)   'pki-acls.json'
+_writeJson @($webEndpoints) 'web-endpoints.json'
 _writeJson $enrollmentServices 'enrollment-services.json'
 _writeJson $caSecurity   'ca-security.json'
 _writeJson $manifest     'collector-manifest.json'
 
-Write-Output ("OK cas={0} templates={1} oids={2} pkiacls={3} editflags=[{4}] ca={5}" -f `
-  $caConfig.Count, $templates.Count, $oids.Count, $pkiAcls.Count, ($editFlags -join ','), $caCommonName)
+Write-Output ("OK cas={0} templates={1} oids={2} pkiacls={3} endpoints={4} editflags=[{5}] ca={6}" -f `
+  $caConfig.Count, $templates.Count, $oids.Count, $pkiAcls.Count, $webEndpoints.Count, ($editFlags -join ','), $caCommonName)

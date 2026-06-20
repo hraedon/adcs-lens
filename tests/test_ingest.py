@@ -152,6 +152,20 @@ def test_severity_enum_round_trips(json_export: Path) -> None:
     assert all(f.check != "TEMPLATE_ACL_UNREADABLE" for f in findings)
 
 
+def test_esc8_detected_end_to_end(json_export: Path) -> None:
+    # The fixture exposes Web Enrollment over HTTP+NTLM+no-EPA (ESC8) and a
+    # Kerberos-only EPA-required CES (clean). Exercise the full
+    # ingest -> EnrollmentEndpoint -> detect_esc8 pipeline.
+    from adcs_lens.detection import run_all
+    estate = ingest(json_export)
+    assert len(estate.endpoints) == 2
+    esc8 = [f for f in run_all(estate) if f.check == "ESC8"]
+    assert len(esc8) == 1
+    assert esc8[0].severity == Severity.HIGH
+    assert esc8[0].subject == "/CertSrv"
+    assert all(f.check != "ENROLLMENT_ENDPOINTS_NOT_EVALUATED" for f in run_all(estate))
+
+
 def test_esc5_detected_end_to_end(json_export: Path) -> None:
     # The fixture carries a benign scoped-WriteProperty NTAuth ACE (no finding)
     # and a low-priv WriteDacl on the PKS container (ESC5). Exercise the full
