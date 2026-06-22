@@ -1,0 +1,65 @@
+<#
+  Windows-only Pester tests for _parseAces, which uses System.DirectoryServices
+  (.NET) to decode an nTSecurityDescriptor and is the input to ESC1/ESC4/ESC5/ESC7.
+  These can't run on Linux pwsh, so they live in their own dir and run only on the
+  windows-latest CI job. We build a security descriptor with known ACEs in-test
+  (no captured blob needed) and assert the round-trip through _parseAces.
+#>
+BeforeAll {
+    . "$PSScriptRoot/../../../scripts/Export-AdcsEstate.ps1" -FunctionsOnly
+
+    $script:ENROLL_GUID = [Guid]'0e10c968-78fb-11d2-90d4-00c04f79dc55'
+    $script:ZERO_GUID = [Guid]'00000000-0000-0000-0000-000000000000'
+    $script:TEST_SID = 'S-1-5-21-1111111111-2222222222-3333333333-1000'
+
+    function New-Sd([System.DirectoryServices.ActiveDirectoryAccessRule[]]$rules) {
+        $sd = New-Object System.DirectoryServices.ActiveDirectorySecurity
+        foreach ($r in $rules) { $sd.AddAccessRule($r) }
+        $sd.GetSecurityDescriptorBinaryForm()
+    }
+    function Rule(
+        [string]$sidStr,
+        [System.DirectoryServices.ActiveDirectoryRights]$rights,
+        [System.Security.AccessControl.AccessControlType]$type,
+        [Guid]$guid
+    ) {
+        # Type the args so PowerShell picks the (IdentityReference, ActiveDirectoryRights,
+        # AccessControlType, Guid) overload unambiguously.
+        $sid = New-Object System.Security.Principal.SecurityIdentifier($sidStr)
+        New-Object System.DirectoryServices.ActiveDirectoryAccessRule($sid, $rights, $type, $guid)
+    }
+}
+
+Describe '_parseAces (Windows / System.DirectoryServices)' {
+    It 'maps an ExtendedRight ACE with the Enroll GUID to the Enroll right' {
+        $bytes = New-Sd @((Rule $TEST_SID 'ExtendedRight' 'Allow' $ENROLL_GUID))
+        $aces = _parseAces $bytes
+        $mine = @($aces | Where-Object { $_.trustee_sid -eq $TEST_SID })
+        $mine.Count | Should -Be 1
+        $mine[0].rights | Should -Contain 'Enroll'
+        $mine[0].ace_type | Should -Be 'Allow'
+    }
+
+    It 'maps an all-zero-ObjectType ExtendedRight ACE to AllExtendedRights' {
+        $bytes = New-Sd @((Rule $TEST_SID 'ExtendedRight' 'Allow' $ZERO_GUID))
+        $mine = @((_parseAces $bytes) | Where-Object { $_.trustee_sid -eq $TEST_SID })
+        $mine[0].rights | Should -Contain 'AllExtendedRights'
+    }
+
+    It 'maps an all-zero-ObjectType WriteProperty ACE to WritePropertyAll (ESC4)' {
+        $bytes = New-Sd @((Rule $TEST_SID 'WriteProperty' 'Allow' $ZERO_GUID))
+        $mine = @((_parseAces $bytes) | Where-Object { $_.trustee_sid -eq $TEST_SID })
+        $mine[0].rights | Should -Contain 'WritePropertyAll'
+    }
+
+    It 'preserves GenericAll and the Deny ACE type' {
+        $bytes = New-Sd @((Rule $TEST_SID 'GenericAll' 'Deny' $ZERO_GUID))
+        $mine = @((_parseAces $bytes) | Where-Object { $_.trustee_sid -eq $TEST_SID })
+        $mine[0].rights | Should -Contain 'GenericAll'
+        $mine[0].ace_type | Should -Be 'Deny'
+    }
+
+    It 'returns an empty result for an empty descriptor' {
+        ((_parseAces ([byte[]]@())) -join ',') | Should -Be ''
+    }
+}
