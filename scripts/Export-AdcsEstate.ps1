@@ -46,7 +46,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$COLLECTOR_VERSION = '0.4.0'
+$COLLECTOR_VERSION = '0.4.1'
 
 function _b64([string]$s) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($s)) }
 $LdapUser = _b64 $LdapUserB64
@@ -426,8 +426,9 @@ if ($CollectDcMapping) {
         }
         $sch = $reg.GetDWORDValue($HKLM, 'SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL', 'CertificateMappingMethods')
         if ($sch.ReturnValue -eq 0 -and $null -ne $sch.uValue) {
-          $bits = [int]$sch.uValue
-          foreach ($k in $SCHANNEL_BITS.Keys) { if ($bits -band [int]$k) { $schannelMethods += $SCHANNEL_BITS[$k] } }
+          # _decode iterates entries by key/value — indexing an [ordered] dict with
+          # an int key selects BY POSITION, which silently mis-decodes the bits.
+          $schannelMethods = _decode ([int]$sch.uValue) $SCHANNEL_BITS
         }
       } catch { Write-Warning "esc10-dc-registry $dcDns failed: $($_.Exception.Message)" }
       $dcConfigs += [ordered]@{
