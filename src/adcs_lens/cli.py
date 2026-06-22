@@ -13,7 +13,8 @@ from collections.abc import Sequence
 
 from adcs_lens import __version__
 from adcs_lens.detection import run_all
-from adcs_lens.display import render_json, render_text
+from adcs_lens.diff import diff_findings
+from adcs_lens.display import render_diff_json, render_diff_text, render_json, render_text
 from adcs_lens.ingest import IngestError, ingest
 from adcs_lens.model import SEVERITY_RANK, Severity
 
@@ -48,6 +49,24 @@ def _build_parser() -> argparse.ArgumentParser:
         "--exit-code",
         action="store_true",
         help="Exit non-zero when any finding meets or exceeds --severity (for CI gating).",
+    )
+
+    p_diff = sub.add_parser(
+        "diff", help="Drift between two exports (Stance 2): what got worse / better."
+    )
+    p_diff.add_argument("old_export", help="The earlier (baseline) export directory.")
+    p_diff.add_argument("new_export", help="The later (current) export directory.")
+    p_diff.add_argument("--json", action="store_true", help="Emit the JSON envelope.")
+    p_diff.add_argument(
+        "--warn-days",
+        type=int,
+        default=90,
+        help="Flag CA certs/CRLs within this many days of expiry (default: 90).",
+    )
+    p_diff.add_argument(
+        "--exit-code",
+        action="store_true",
+        help="Exit non-zero when there are regressions (new or worsened findings).",
     )
     return parser
 
@@ -94,6 +113,25 @@ def _cmd_doctor(
     return 0
 
 
+def _cmd_diff(
+    old_export: str,
+    new_export: str,
+    *,
+    as_json: bool,
+    warn_days: int,
+    exit_code: bool,
+) -> int:
+    old = run_all(ingest(old_export), warn_days=warn_days)
+    new = run_all(ingest(new_export), warn_days=warn_days)
+    report = diff_findings(old, new)
+
+    print(render_diff_json(report) if as_json else render_diff_text(report))
+
+    if exit_code and report.regressions:
+        return 1
+    return 0
+
+
 def _error(message: str) -> int:
     print(f"error: {message}", file=sys.stderr)
     return 1
@@ -110,6 +148,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 as_json=args.json,
                 warn_days=args.warn_days,
                 severity=args.severity,
+                exit_code=args.exit_code,
+            )
+        if args.command == "diff":
+            return _cmd_diff(
+                args.old_export,
+                args.new_export,
+                as_json=args.json,
+                warn_days=args.warn_days,
                 exit_code=args.exit_code,
             )
     except IngestError as exc:

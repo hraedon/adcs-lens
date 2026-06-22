@@ -70,7 +70,7 @@ later plan), never from a standing connection.
 - **Endpoint TLS lifecycle** — cert-watch's job.
 - **Live-touch / standing access / alerting.** adcs-lens never holds a live
   connection to AD CS and never alerts. Change detection comes from diffing
-  *scheduled read-only exports* (Stance 2, a later plan), not from monitoring.
+  *scheduled read-only exports* (Stance 2, the `diff` command), not from monitoring.
   Anything that genuinely needs standing access or push alerting — e.g.
   continuous private-trust CRL freshness — belongs to cert-watch.
 - **Remediation execution.** adcs-lens describes and prioritizes; it does not
@@ -103,6 +103,8 @@ scripts/Export-AdcsEstate.ps1 -OutputDir C:\AdcsExport
 adcs-lens ingest C:\AdcsExport
 adcs-lens doctor C:\AdcsExport            # prioritized posture + lifecycle findings
 adcs-lens doctor C:\AdcsExport --json     # stable JSON envelope
+adcs-lens diff  OLD\Export NEW\Export     # Stance 2: what got worse / better since the baseline
+adcs-lens diff  OLD NEW --exit-code       # non-zero on regressions (for scheduled scans)
 ```
 
 > Status: the deterministic core is built and tested (ingest → `doctor`) with
@@ -136,7 +138,9 @@ threat model marks statically detectable. The collector — including the opt-in
 ESC10/ESC14 DC certificate-mapping passes — is validated against the live lab.
 Remaining: a live *positive* (vulnerable-config) validation for the newer
 detectors (ESC10/11/13/14 were negative-validated live and positive-validated on
-the synthetic fixture) and the Stance-2 export-diff drift feature (WI-001).
+the synthetic fixture). Stance-2 drift detection (`diff`) is built: it diffs the
+findings of two read-only exports and reports regressions / fixes / severity
+changes, with `--exit-code` for scheduled-scan gating — no live access.
 Foundational docs:
 - [`docs/threat-model.md`](docs/threat-model.md) — the ESC + hygiene catalogue
   with the static-detectability boundary. **Start here.**

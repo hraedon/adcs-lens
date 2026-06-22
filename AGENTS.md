@@ -26,7 +26,7 @@ narrates facts the core computed. See `README.md` for the full charter.
 - **Read-only, never live.** No code authenticates to, enrolls against, or
   writes to AD CS. Input is exported files only. **No standing connection and no
   alerting** — change detection comes from diffing scheduled read-only exports
-  (Stance 2, a later plan), not monitoring. Live/continuous concerns are
+  (Stance 2, the `diff` command), not monitoring. Live/continuous concerns are
   cert-watch's (see Boundary).
 - **Flag, don't probe.** Detect the *enabling configuration* of a weakness
   statically; never perform the attack (enroll, relay, request) to confirm it.
@@ -79,7 +79,7 @@ exports (WI-001), never from a standing connection.
 
 ## Status
 
-The deterministic core is built and tested (ingest → `doctor`, ESC1 + ESC2 +
+The deterministic core is built and tested (ingest → `doctor` → `diff`, ESC1 + ESC2 +
 ESC3 + ESC4 + ESC5 + ESC6 + ESC7 + ESC8 + ESC9 + ESC11 + ESC13 + infra lifecycle
 detectors, architecture guard), plus a per-template unreadable-DACL signal
 (`TEMPLATE_ACL_UNREADABLE`). The read-only PowerShell collector
