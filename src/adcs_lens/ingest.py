@@ -261,9 +261,8 @@ def ingest(export_dir: str | Path) -> Estate:
         IssuanceOid(
             oid=_coerce_str(o.get("oid", "")),
             name=_coerce_str(o.get("name", "")),
-            group_link_sid=(
-                normalize_sid(_coerce_str(o["group_link_sid"])) if o.get("group_link_sid") else None
-            ),
+            # msDS-OIDToGroupLink is a group DN (not a SID) — store it verbatim.
+            group_link=_coerce_str(o["group_link"]) if o.get("group_link") else None,
         )
         for o in _require_list(base, "oid-objects.json", _load(base, "oid-objects.json"))
     )

@@ -264,11 +264,15 @@ class EnrollmentEndpoint:
 
 @dataclass(frozen=True)
 class IssuanceOid:
-    """An enterprise issuance-policy OID and any group it is linked to (ESC13)."""
+    """An enterprise issuance-policy OID and any group it is linked to (ESC13).
+
+    ``group_link`` is the DN of the group the OID maps to via msDS-OIDToGroupLink
+    (the AMA link), or None. It is a distinguished name, not a SID.
+    """
 
     oid: str
     name: str
-    group_link_sid: str | None
+    group_link: str | None
 
 
 @dataclass(frozen=True)

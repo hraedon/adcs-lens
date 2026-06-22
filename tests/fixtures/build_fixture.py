@@ -188,7 +188,7 @@ def build_export(
 
     _write_json(
         base / "oid-objects.json",
-        [{"oid": POLICY_OID, "name": "Lab High Assurance", "group_link_sid": None}],
+        [{"oid": POLICY_OID, "name": "Lab High Assurance", "group_link": None}],
     )
 
     # ESC8: Web Enrollment reachable over HTTP with NTLM and no Extended

@@ -97,12 +97,14 @@ principal can enroll in (the requester injects application policies on an unpatc
 CA) — reuses existing collector data (schema_version + enroll ACL), no new pass.
 The full statically-detectable ESC family is now built. ESC5 is
 negative-validated on the real CA with positive validation via the synthetic
-fixture; ESC8/ESC10/ESC11/ESC14 are **positive-validated on the real lab** (ESC8
-live `/certsrv` HTTP+NTLM+no-EPA → HIGH; ESC10 via a temporary Schannel UPN bit +
-disabled binding on a DC; ESC11 via a temporarily-cleared
-IF_ENFORCEENCRYPTICERTREQUEST; ESC14 via a temporary weak altSecurityIdentities —
-all reverted with cleanup discipline). ESC13 still awaits live positive (needs an
-AMA OID-to-group-link); positive for it is covered by the synthetic fixture.
+fixture; ESC8/ESC10/ESC11/ESC13/ESC14 are **positive-validated on the real lab**
+(ESC8 live `/certsrv` HTTP+NTLM+no-EPA → HIGH; ESC10 via a temporary Schannel UPN
+bit + disabled binding on a DC; ESC11 via a temporarily-cleared
+IF_ENFORCEENCRYPTICERTREQUEST; ESC13 via a temporary AMA OID→universal-security-group
+link on a v1 template; ESC14 via a temporary weak altSecurityIdentities — all
+reverted with cleanup discipline). The ESC13 validation caught a collector bug: it
+read the OID→group link from the non-existent `msPKI-OIDToGroupLink` instead of
+`msDS-OIDToGroupLink` (a group DN), so ESC13 was a permanent false negative.
 
 The collector's OS-independent helpers (bit decoders, certutil parsers, IIS
 classifiers) are unit-tested with Pester via `-FunctionsOnly` (CI `collector-helpers`

@@ -981,7 +981,7 @@ def detect_template_acl_gaps(estate: Estate) -> list[Finding]:
 
 def _group_linked_policies(estate: Estate) -> dict[str, str]:
     """Return a map of issuance-policy OID -> linked group SID (ESC13)."""
-    return {o.oid: o.group_link_sid for o in estate.oids if o.group_link_sid}
+    return {o.oid: o.group_link for o in estate.oids if o.group_link}
 
 
 def detect_esc11(estate: Estate) -> list[Finding]:
@@ -1040,7 +1040,7 @@ def detect_esc13(estate: Estate) -> list[Finding]:
     if not _template_security_collected(estate):
         return []
     policy_map = _group_linked_policies(estate)
-    oid_names = {o.oid: o.name for o in estate.oids if o.group_link_sid}
+    oid_names = {o.oid: o.name for o in estate.oids if o.group_link}
     findings: list[Finding] = []
     for tmpl in estate.templates:
         if not tmpl.acl_obtained:

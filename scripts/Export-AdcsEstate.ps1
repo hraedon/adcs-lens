@@ -50,7 +50,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$COLLECTOR_VERSION = '0.4.2'
+$COLLECTOR_VERSION = '0.4.3'
 
 function _b64([string]$s) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($s)) }
 
@@ -327,11 +327,14 @@ $oidRoot = _ldapRoot 'CN=OID'
 $oids = @()
 foreach ($r in (_search $oidRoot '(objectClass=msPKI-Enterprise-Oid)')) {
   $p = $r.Properties
-  $gl = if ($p['mspki-oidtogrouplink'].Count) { [string]$p['mspki-oidtogrouplink'][0] } else { $null }
+  # The OID->group link (ESC13) is msDS-OIDToGroupLink (a group DN), NOT
+  # msPKI-OIDToGroupLink — the latter does not exist, so the old name always
+  # read $null and ESC13 could never fire on real data.
+  $gl = if ($p['msds-oidtogrouplink'].Count) { [string]$p['msds-oidtogrouplink'][0] } else { $null }
   $oids += [ordered]@{
-    oid            = [string]$p['mspki-cert-template-oid'][0]
-    name           = [string]$p['displayname'][0]
-    group_link_sid = $gl
+    oid        = [string]$p['mspki-cert-template-oid'][0]
+    name       = [string]$p['displayname'][0]
+    group_link = $gl
   }
 }
 
