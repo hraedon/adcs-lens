@@ -116,22 +116,24 @@ adcs-lens doctor C:\AdcsExport --json     # stable JSON envelope
 > backs ESC5 and the IIS enrollment-endpoint pass (Web Enrollment / CES bindings,
 > Windows-auth, Extended Protection) that backs ESC8. The synthetic fixture
 > generator (`tests/fixtures/build_fixture.py`) exercises the full pipeline
-> end-to-end. The **ESC10 / ESC14** detectors (DC certificate-mapping) are built
-> and tested with a KB5014754-aligned taxonomy — ESC10 keys on the Schannel UPN
-> mapping bit and a disabled KDC binding; ESC14 flags only *weak (reusable)*
-> altSecurityIdentities forms (subject-only, issuer+subject, RFC822, UPN), never
-> the strong (nonreusable) issuer+serial / SKI / SHA1-PUKEY forms. Their collector
-> passes (`esc10-dc-registry`, `esc14-altsecid`) are not wired yet — until then
-> they degrade to a note rather than firing positively. ESC15 is still planned
-> (see open work items).
+> end-to-end. The **ESC10 / ESC14** detectors (DC certificate-mapping) use a
+> KB5014754-aligned taxonomy — ESC10 keys on the Schannel UPN mapping bit and a
+> disabled KDC binding; ESC14 flags only *weak (reusable)* altSecurityIdentities
+> forms (subject-only, issuer+subject, RFC822, UPN), never the strong (nonreusable)
+> issuer+serial / SKI / SHA1-PUKEY forms. Their opt-in collector passes
+> (`-CollectDcMapping`: `esc10-dc-registry` via WMI StdRegProv against each DC,
+> `esc14-altsecid` via LDAP) are built and **validated live** against the lab —
+> DC discovery, remote registry read, and altSecurityIdentities read all confirmed
+> end-to-end. ESC15 is still planned (see open work items).
 
 ## Status
 
 Core built (Plan 001 Phases 0, 1, 2, 3) with ESC1/2/3/4/5/6/7/8/9/10/11/13/14
-detectors and infrastructure cert/CRL-expiry checks. The collector is validated
-against a live enterprise CA. Remaining: the ESC10/ESC14 collector passes (the
-detectors exist; the DC-registry and altSecurityIdentities collection passes are
-not wired yet) and ESC15 (EKUwu).
+detectors and infrastructure cert/CRL-expiry checks. The collector — including
+the opt-in ESC10/ESC14 DC certificate-mapping passes — is validated against the
+live lab. Remaining: ESC15 (EKUwu) and a live *positive* (vulnerable-config)
+validation for ESC10/ESC14 (the lab is in a secure default state, so they were
+negative-validated live and positive-validated on the synthetic fixture).
 Foundational docs:
 - [`docs/threat-model.md`](docs/threat-model.md) — the ESC + hygiene catalogue
   with the static-detectability boundary. **Start here.**

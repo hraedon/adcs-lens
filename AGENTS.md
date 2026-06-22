@@ -87,12 +87,15 @@ detectors, architecture guard), plus a per-template unreadable-DACL signal
 DACLs → ACEs, and an `acl_obtained` marker), CA role security
 (`CA\Security` → ESC7), PKI-object ACLs (NTAuth / AIA / CDP / PKS containers +
 CA objects → ESC5), IIS enrollment endpoints (Web Enrollment / CES bindings +
-Windows-auth + Extended Protection → ESC8), and issuance OIDs; validated
-end-to-end against a live enterprise CA. The ESC10/ESC14 detectors are built and
-tested, but their collector passes (`esc10-dc-registry`, `esc14-altsecid`) are
-not wired yet, so they degrade to a note. Remaining: ESC10/ESC14 collector
-passes, ESC15. ESC5 is
+Windows-auth + Extended Protection → ESC8), issuance OIDs, and the opt-in
+ESC10/ESC14 DC certificate-mapping passes (`-CollectDcMapping`: `esc14-altsecid`
+LDAP read of principal altSecurityIdentities + `esc10-dc-registry` per-DC KDC
+StrongCertificateBindingEnforcement and Schannel CertificateMappingMethods via
+WMI StdRegProv with explicit creds); validated end-to-end against a live
+enterprise CA. Remaining: ESC15. ESC5 is
 negative-validated on the real CA with positive validation via the synthetic
 fixture; ESC8 is **positive-validated on the real CA** (live `/certsrv`
-HTTP+NTLM+no-EPA → HIGH); ESC11/ESC13 are negative-validated on the real CA but
-still await positive (vulnerable-config) validation there.
+HTTP+NTLM+no-EPA → HIGH); ESC11/ESC13/ESC10/ESC14 are negative-validated on the
+real lab but still await positive (vulnerable-config) validation there (ESC10/ESC14
+positive is covered by the synthetic fixture; the lab DCs run secure defaults —
+StrongCertificateBindingEnforcement unset, no Schannel UPN bit, no altSecurityIdentities).

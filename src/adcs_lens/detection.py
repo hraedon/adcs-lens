@@ -796,14 +796,16 @@ def detect_esc10(estate: Estate) -> list[Finding]:
                 Finding(
                     check="ESC10_ENFORCEMENT_UNKNOWN",
                     severity=Severity.INFO,
-                    title="DC StrongCertificateBindingEnforcement not read",
+                    title="DC StrongCertificateBindingEnforcement not confirmed",
                     subject=dc.name,
                     detail=(
-                        "The Schannel mapping methods were read but "
-                        "StrongCertificateBindingEnforcement could not be. ESC10 case 2 "
-                        "cannot be ruled out. Re-collect with registry read rights on the DC."
+                        "StrongCertificateBindingEnforcement is not explicitly configured or "
+                        "could not be read, so its value is the OS default — which is Full only "
+                        "on DCs patched past the Feb 2025 enforcement date, and Compatibility "
+                        "(weak) otherwise. ESC10 case 2 cannot be ruled out without confirming "
+                        "it; set the value to 2 (Full) explicitly to be certain."
                     ),
-                    source=f"DC '{dc.name}': StrongCertificateBindingEnforcement unreadable",
+                    source=f"DC '{dc.name}': StrongCertificateBindingEnforcement not set",
                 )
             )
     return findings

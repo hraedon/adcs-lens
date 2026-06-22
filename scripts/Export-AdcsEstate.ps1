@@ -20,16 +20,33 @@
 
 .PARAMETER LdapUserB64 / .PARAMETER LdapPassB64
   Base64 (UTF-8) of the LDAP bind username (UPN or DOMAIN\user) and password.
+
+.PARAMETER CollectDcMapping
+  Opt in to the ESC10/ESC14 DC certificate-mapping passes (they widen the export
+  footprint beyond the AD CS config). Enables esc14-altsecid (an LDAP read of
+  principal altSecurityIdentities). Without it both passes are skipped + noted.
+
+.PARAMETER DcRegistryUserB64 / .PARAMETER DcRegistryPassB64
+  Base64 (UTF-8) creds with remote-registry read on the domain controllers, used
+  by the esc10-dc-registry pass (KDC StrongCertificateBindingEnforcement + Schannel
+  CertificateMappingMethods via WMI). Only used when -CollectDcMapping is set; if
+  absent the esc10-dc-registry pass is skipped + noted.
 #>
 [CmdletBinding()]
 param(
   [Parameter(Mandatory)] [string] $OutDir,
   [Parameter(Mandatory)] [string] $LdapUserB64,
-  [Parameter(Mandatory)] [string] $LdapPassB64
+  [Parameter(Mandatory)] [string] $LdapPassB64,
+  # ESC10/ESC14 DC certificate-mapping passes widen the export footprint, so they
+  # are opt-in. When set, esc14-altsecid (LDAP altSecurityIdentities) runs; the
+  # esc10-dc-registry pass additionally needs DC-admin creds for remote registry.
+  [switch] $CollectDcMapping,
+  [string] $DcRegistryUserB64,
+  [string] $DcRegistryPassB64
 )
 
 $ErrorActionPreference = 'Stop'
-$COLLECTOR_VERSION = '0.3.0'
+$COLLECTOR_VERSION = '0.4.0'
 
 function _b64([string]$s) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($s)) }
 $LdapUser = _b64 $LdapUserB64
@@ -351,9 +368,83 @@ if (-not $endpointsSkipped) {
   }
 }
 
+# --- DC certificate mapping (ESC10 / ESC14) ---------------------------------
+# Opt-in (-CollectDcMapping). esc14-altsecid is an LDAP read of principal
+# altSecurityIdentities (raw values; the detector classifies the X.509 form).
+# esc10-dc-registry reads each DC's KDC StrongCertificateBindingEnforcement and
+# Schannel CertificateMappingMethods DWORD via WMI StdRegProv with explicit creds.
+$dcConfigs = @()
+$principalMappings = @()
+$esc10Skipped = $true
+$esc14Skipped = $true
+if ($CollectDcMapping) {
+  $domNc = (New-Object DirectoryServices.DirectoryEntry("LDAP://RootDSE", $LdapUser, $LdapPass)).defaultNamingContext
+
+  # esc14-altsecid: every principal carrying an altSecurityIdentities value.
+  try {
+    $domRoot = New-Object DirectoryServices.DirectoryEntry("LDAP://$domNc", $LdapUser, $LdapPass)
+    $s = New-Object DirectoryServices.DirectorySearcher($domRoot)
+    $s.Filter = '(altSecurityIdentities=*)'; $s.PageSize = 200; $s.SearchScope = 'Subtree'
+    [void]$s.PropertiesToLoad.Add('distinguishedName')
+    [void]$s.PropertiesToLoad.Add('altSecurityIdentities')
+    foreach ($r in $s.FindAll()) {
+      $maps = @(); foreach ($m in $r.Properties['altsecurityidentities']) { $maps += [string]$m }
+      $principalMappings += [ordered]@{
+        dn       = [string]$r.Properties['distinguishedname'][0]
+        mappings = (@($maps))
+      }
+    }
+    $esc14Skipped = $false
+  } catch { Write-Warning "esc14-altsecid failed: $($_.Exception.Message)" }
+
+  # esc10-dc-registry: per-DC KDC + Schannel registry (needs DC-admin creds).
+  if ($DcRegistryUserB64 -and $DcRegistryPassB64) {
+    $HKLM = [uint32]2147483650
+    $SCHANNEL_BITS = [ordered]@{ 1 = 'subject_issuer'; 2 = 'issuer'; 4 = 'upn'; 8 = 's4u2self'; 16 = 's4u2self_explicit' }
+    $dcCred = New-Object Management.Automation.PSCredential(
+      (_b64 $DcRegistryUserB64),
+      (ConvertTo-SecureString (_b64 $DcRegistryPassB64) -AsPlainText -Force))
+    $localHost = ([string](hostname)).ToLower()
+    # Discover DCs from the domain NC (server-trust accounts: UAC bit 0x2000).
+    $dcRoot = New-Object DirectoryServices.DirectoryEntry("LDAP://$domNc", $LdapUser, $LdapPass)
+    $ds = New-Object DirectoryServices.DirectorySearcher($dcRoot)
+    $ds.Filter = '(&(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))'
+    $ds.PageSize = 200; $ds.SearchScope = 'Subtree'; [void]$ds.PropertiesToLoad.Add('dnshostname')
+    foreach ($r in $ds.FindAll()) {
+      $dcDns = [string]$r.Properties['dnshostname'][0]
+      if (-not $dcDns) { continue }
+      $binding = 'unknown'; $schannelMethods = @()
+      try {
+        if ($dcDns.ToLower() -eq $localHost -or $dcDns.ToLower().StartsWith($localHost + '.')) {
+          $reg = Get-WmiObject -Namespace 'root\default' -Class StdRegProv -List
+        } else {
+          $reg = Get-WmiObject -ComputerName $dcDns -Credential $dcCred -Namespace 'root\default' -Class StdRegProv -List
+        }
+        $kdc = $reg.GetDWORDValue($HKLM, 'SYSTEM\CurrentControlSet\Services\Kdc', 'StrongCertificateBindingEnforcement')
+        if ($kdc.ReturnValue -eq 0 -and $null -ne $kdc.uValue) {
+          $binding = switch ([int]$kdc.uValue) { 0 { 'disabled' } 1 { 'permissive' } 2 { 'strict' } default { 'unknown' } }
+        }
+        $sch = $reg.GetDWORDValue($HKLM, 'SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL', 'CertificateMappingMethods')
+        if ($sch.ReturnValue -eq 0 -and $null -ne $sch.uValue) {
+          $bits = [int]$sch.uValue
+          foreach ($k in $SCHANNEL_BITS.Keys) { if ($bits -band [int]$k) { $schannelMethods += $SCHANNEL_BITS[$k] } }
+        }
+      } catch { Write-Warning "esc10-dc-registry $dcDns failed: $($_.Exception.Message)" }
+      $dcConfigs += [ordered]@{
+        name                                   = $dcDns
+        strong_certificate_binding_enforcement = $binding
+        schannel_mapping_methods               = (@($schannelMethods))
+      }
+    }
+    $esc10Skipped = $false
+  }
+}
+
 # --- manifest ----------------------------------------------------------------
 $skippedPasses = @('certs')                                   # cert/CRL DER ([certs] extra)
 if ($endpointsSkipped) { $skippedPasses += 'enrollment-endpoints' }
+if ($esc10Skipped) { $skippedPasses += 'esc10-dc-registry' }
+if ($esc14Skipped) { $skippedPasses += 'esc14-altsecid' }
 $manifest = [ordered]@{
   collector_version = $COLLECTOR_VERSION
   collected_at      = (Get-Date).ToUniversalTime().ToString('o')
@@ -368,9 +459,11 @@ _writeJson @($templates) 'templates.json'
 _writeJson @($oids)      'oid-objects.json'
 _writeJson @($pkiAcls)   'pki-acls.json'
 _writeJson @($webEndpoints) 'web-endpoints.json'
+_writeJson @($dcConfigs) 'dc-config.json'
+_writeJson @($principalMappings) 'principal-mappings.json'
 _writeJson $enrollmentServices 'enrollment-services.json'
 _writeJson $caSecurity   'ca-security.json'
 _writeJson $manifest     'collector-manifest.json'
 
-Write-Output ("OK cas={0} templates={1} oids={2} pkiacls={3} endpoints={4} editflags=[{5}] ca={6}" -f `
-  $caConfig.Count, $templates.Count, $oids.Count, $pkiAcls.Count, $webEndpoints.Count, ($editFlags -join ','), $caCommonName)
+Write-Output ("OK cas={0} templates={1} oids={2} pkiacls={3} endpoints={4} dcs={5} altsecid={6} editflags=[{7}] ca={8}" -f `
+  $caConfig.Count, $templates.Count, $oids.Count, $pkiAcls.Count, $webEndpoints.Count, $dcConfigs.Count, $principalMappings.Count, ($editFlags -join ','), $caCommonName)
