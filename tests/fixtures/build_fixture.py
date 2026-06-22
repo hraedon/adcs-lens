@@ -199,44 +199,48 @@ def build_export(
     # ESC10: DC registry config. The fixture models a weak configuration
     # (permissive enforcement + weak mapping methods enabled) to exercise the
     # detector. A second DC with strict enforcement exercises the negative branch.
+    # LAB-DC01: ESC10 both cases — binding Disabled (case 2) + Schannel UPN bit
+    # (case 1). LAB-DC02: Full enforcement, no UPN bit — the negative branch.
     _write_json(
         base / "dc-config.json",
         [
             {
                 "name": "LAB-DC01",
-                "strong_certificate_binding_enforcement": "permissive",
-                "certificate_mapping_methods": [
-                    "subject",
-                    "issuer_serial",
-                    "alt_security_identities",
-                ],
+                "strong_certificate_binding_enforcement": "disabled",
+                "schannel_mapping_methods": ["upn", "s4u2self", "s4u2self_explicit"],
             },
             {
                 "name": "LAB-DC02",
                 "strong_certificate_binding_enforcement": "strict",
-                "certificate_mapping_methods": ["subject_issuer_serial"],
+                "schannel_mapping_methods": ["s4u2self", "s4u2self_explicit"],
             },
         ],
     )
 
-    # ESC14: Principal altSecurityIdentities. One principal with X.509-like
-    # mappings (should flag), one with only Kerberos/UPN (should not flag).
+    # ESC14: a principal with a weak (reusable) issuer+subject mapping should flag
+    # (LAB-DC01 is non-strict); a principal with only strong (nonreusable) forms —
+    # issuer+serial and SKI — must NOT flag; a Kerberos-only principal must NOT flag.
     _write_json(
         base / "principal-mappings.json",
         [
             {
                 "dn": "CN=Service Account,OU=Service Accounts,DC=lab,DC=example,DC=com",
                 "mappings": [
-                    "X509:<I>CN=LAB Issuing CA<S>CN=Service Account",
-                    "CN=Service Account,OU=Service Accounts,DC=lab,DC=example,DC=com",
+                    "X509:<I>DC=com,DC=example,CN=LAB-CA<S>DC=com,DC=example,CN=Service Account",
                     "1.3.6.1.4.1.311.20.2.3=Service Account@lab.example.com",
+                ],
+            },
+            {
+                "dn": "CN=Strong Mapped,OU=Service Accounts,DC=lab,DC=example,DC=com",
+                "mappings": [
+                    "X509:<I>DC=com,DC=example,CN=LAB-CA<SR>1200000000AABBCCDD",
+                    "X509:<SKI>aB1cD2eF3gH4iJ5kL6mN7oP8qR",
                 ],
             },
             {
                 "dn": "CN=Regular User,OU=Users,DC=lab,DC=example,DC=com",
                 "mappings": [
                     "kerberos:user@LAB.EXAMPLE.COM",
-                    "upn:user@lab.example.com",
                 ],
             },
         ],

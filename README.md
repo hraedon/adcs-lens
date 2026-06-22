@@ -117,9 +117,13 @@ adcs-lens doctor C:\AdcsExport --json     # stable JSON envelope
 > Windows-auth, Extended Protection) that backs ESC8. The synthetic fixture
 > generator (`tests/fixtures/build_fixture.py`) exercises the full pipeline
 > end-to-end. The **ESC10 / ESC14** detectors (DC certificate-mapping) are built
-> and tested, but their collector passes (`esc10-dc-registry`,
-> `esc14-altsecid`) are not wired yet — until then they degrade to a note rather
-> than firing positively. ESC15 is still planned (see open work items).
+> and tested with a KB5014754-aligned taxonomy — ESC10 keys on the Schannel UPN
+> mapping bit and a disabled KDC binding; ESC14 flags only *weak (reusable)*
+> altSecurityIdentities forms (subject-only, issuer+subject, RFC822, UPN), never
+> the strong (nonreusable) issuer+serial / SKI / SHA1-PUKEY forms. Their collector
+> passes (`esc10-dc-registry`, `esc14-altsecid`) are not wired yet — until then
+> they degrade to a note rather than firing positively. ESC15 is still planned
+> (see open work items).
 
 ## Status
 

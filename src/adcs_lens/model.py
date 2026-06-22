@@ -91,7 +91,12 @@ class EpaPolicy(StrEnum):
 
 
 class StrongCertBinding(StrEnum):
-    """DC StrongCertificateBindingEnforcement registry value."""
+    """DC ``StrongCertificateBindingEnforcement`` registry value (KDC key).
+
+    Per KB5014754: 0 = Disabled (no strong-mapping check), 1 = Compatibility
+    ("permissive" — strong mapping attempted, weak allowed with a warning),
+    2 = Full ("strict" — strong mapping required).
+    """
 
     DISABLED = "disabled"
     PERMISSIVE = "permissive"
@@ -99,14 +104,55 @@ class StrongCertBinding(StrEnum):
     UNKNOWN = "unknown"
 
 
-class CertMappingMethod(StrEnum):
-    """DC CertificateMappingMethods registry value."""
+class SchannelMappingMethod(StrEnum):
+    """A bit of the Schannel ``CertificateMappingMethods`` registry DWORD.
 
-    SUBJECT = "subject"
-    ISSUER_SERIAL = "issuer_serial"
-    SUBJECT_ISSUER_SERIAL = "subject_issuer_serial"
-    ALT_SECURITY_IDENTITIES = "alt_security_identities"
+    Bits per the TLS registry-settings doc: Subject/Issuer 0x1, Issuer 0x2,
+    UPN 0x4, S4U2Self 0x8, S4U2Self-Explicit 0x10. ESC10 "case 1" is the UPN
+    bit: a certificate's UPN SAN alone maps to an account, so an attacker who
+    can write a victim's UPN can impersonate it.
+    """
+
+    SUBJECT_ISSUER = "subject_issuer"
+    ISSUER = "issuer"
+    UPN = "upn"
+    S4U2SELF = "s4u2self"
+    S4U2SELF_EXPLICIT = "s4u2self_explicit"
     UNKNOWN = "unknown"
+
+
+class X509MappingForm(StrEnum):
+    """The form of an ``altSecurityIdentities`` X.509 mapping value (ESC14).
+
+    Strong (nonreusable) vs weak (reusable) per KB5014754. Strong forms bind to
+    a specific certificate (serial, key id, or public-key hash); weak forms bind
+    to reusable fields (subject/issuer DN, email, UPN) that an attacker can
+    obtain a matching certificate for.
+    """
+
+    # Strong (nonreusable)
+    ISSUER_SERIAL = "issuer_serial"  # X509:<I>...<SR>...
+    SKI = "ski"  # X509:<SKI>...
+    SHA1_PUBLIC_KEY = "sha1_public_key"  # X509:<SHA1-PUKEY>...
+    # Weak (reusable)
+    ISSUER_SUBJECT = "issuer_subject"  # X509:<I>...<S>...
+    SUBJECT_ONLY = "subject_only"  # X509:<S>...
+    RFC822 = "rfc822"  # X509:<RFC822>...
+    PRINCIPAL_NAME = "principal_name"  # X509:<PN>...
+    # Not an X.509 mapping (e.g. Kerberos:...) or unrecognized
+    UNKNOWN = "unknown"
+
+
+# X.509 mapping forms that are weak (reusable) and so exploitable when the DC's
+# StrongCertificateBindingEnforcement is not strict.
+WEAK_X509_MAPPING_FORMS: frozenset[X509MappingForm] = frozenset(
+    {
+        X509MappingForm.ISSUER_SUBJECT,
+        X509MappingForm.SUBJECT_ONLY,
+        X509MappingForm.RFC822,
+        X509MappingForm.PRINCIPAL_NAME,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -241,11 +287,16 @@ class Manifest:
 
 @dataclass(frozen=True)
 class DcConfiguration:
-    """A domain controller's certificate mapping configuration (ESC10 surface)."""
+    """A domain controller's certificate mapping configuration (ESC10 surface).
+
+    ``schannel_mapping_methods`` is the decoded Schannel ``CertificateMappingMethods``
+    DWORD; ``strong_certificate_binding_enforcement`` is the KDC value. ESC10 keys
+    on the UPN Schannel bit (case 1) and a disabled binding enforcement (case 2).
+    """
 
     name: str
     strong_certificate_binding_enforcement: StrongCertBinding
-    certificate_mapping_methods: frozenset[CertMappingMethod]
+    schannel_mapping_methods: frozenset[SchannelMappingMethod]
 
 
 @dataclass(frozen=True)

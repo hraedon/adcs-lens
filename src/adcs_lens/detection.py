@@ -15,20 +15,22 @@ from datetime import UTC, datetime
 
 from adcs_lens.model import (
     SEVERITY_RANK,
+    WEAK_X509_MAPPING_FORMS,
     AceEntry,
     AceType,
     AclKind,
     CaKind,
     CertKind,
-    CertMappingMethod,
     CertTemplate,
     Crl,
     CrlTier,
     EndpointKind,
     EpaPolicy,
     Estate,
+    SchannelMappingMethod,
     Severity,
     StrongCertBinding,
+    X509MappingForm,
 )
 from adcs_lens.normalize import is_low_priv_trustee
 
@@ -136,40 +138,25 @@ _ESC11_FLAG = "IF_ENFORCEENCRYPTICERTREQUEST"
 _ESC8_ENDPOINTS_PASS = "enrollment-endpoints"
 
 # --- ESC10: Weak DC certificate mapping ----------------------------------------
-# DC registry values: StrongCertificateBindingEnforcement (1=Strict, 0=Disabled)
-# and CertificateMappingMethods (bitmask). We flag when Strict enforcement is off
-# and a weak mapping method (Subject-only, IssuerSerial, or AltSecurityIdentities)
-# is enabled. The pass for this is 'esc10-dc-registry'.
+# Two registry-backed cases, per SpecterOps "Certified Pre-Owned" + KB5014754:
+#   case 1: Schannel CertificateMappingMethods has the UPN bit (0x4) — a cert's
+#           UPN SAN alone maps to an account, so writing a victim's UPN impersonates it.
+#   case 2: KDC StrongCertificateBindingEnforcement is Disabled — weak/implicit
+#           mappings are allowed (the ESC9 "no SID extension" path opens up).
+# The pass for this is 'esc10-dc-registry'.
 _ESC10_DC_REGISTRY_PASS = "esc10-dc-registry"
-# Mapping methods that are "weak" (rely on cert fields that can be duplicated or
-# do not bind to the specific account). Subject-only is the weakest.
-_WEAK_MAPPING_METHODS = frozenset(
-    {
-        CertMappingMethod.SUBJECT,
-        CertMappingMethod.ISSUER_SERIAL,
-        CertMappingMethod.ALT_SECURITY_IDENTITIES,
-    }
-)
-
-# DCs with non-strict enforcement where weak mappings are actually exploitable.
-# UNKNOWN is excluded here — we don't know the enforcement state, so we don't
-# assert vulnerability (avoid false HIGH). UNKNOWN DCs are handled separately.
-_STRONG_BINDING_VULNERABLE = frozenset(
-    {StrongCertBinding.DISABLED, StrongCertBinding.PERMISSIVE}
-)
+# StrongCertificateBindingEnforcement states that leave weak mappings exploitable.
+# UNKNOWN is excluded — we don't know the state, so we don't assert vulnerability.
+_BINDING_NON_STRICT = frozenset({StrongCertBinding.DISABLED, StrongCertBinding.PERMISSIVE})
 
 # --- ESC14: Weak explicit cert mapping via altSecurityIdentities ----------------
-# When a principal has altSecurityIdentities values that map X.509 certs to the
-# principal, and the DC allows mapping via altSecurityIdentities (CertificateMappingMethods
-# includes the altSecurityIdentities bit), an attacker who obtains a cert matching
-# one of those values can authenticate as that principal. We flag the enabling
-# configuration; the actual mapping attack is out of scope.
+# A principal whose altSecurityIdentities holds a *weak* (reusable) X.509 mapping
+# form — subject-only, issuer+subject, RFC822/email, or UPN — can be impersonated
+# by anyone who obtains a certificate matching those reusable fields, unless the
+# DC enforces strong binding (StrongCertificateBindingEnforcement = strict). Strong
+# (nonreusable) forms — issuer+serial, SKI, SHA1 public key — are not flagged.
 # The pass for this is 'esc14-altsecid'.
 _ESC14_ALTSECID_PASS = "esc14-altsecid"
-# Only the X509: prefix (or bracketed <X509:...> form) is a reliable indicator
-# of an X.509 certificate mapping. CN= and OID patterns match plain DNs which
-# are ambiguous and not necessarily X.509 mappings.
-_X509_PREFIXES = ("X509:", "<X509:")
 # Auth providers that permit NTLM: explicit NTLM, or Negotiate (which falls back
 # to NTLM unless it is explicitly disabled — so a Negotiate endpoint is treated
 # as NTLM-relayable).
@@ -712,89 +699,160 @@ def detect_esc9(estate: Estate) -> list[Finding]:
     return findings
 
 
-def detect_esc10(estate: Estate) -> list[Finding]:
-    """Flag DCs with weak certificate mapping configuration.
+def _schannel_method_list(methods: frozenset[SchannelMappingMethod]) -> str:
+    """Render the enabled Schannel mapping methods for a finding's source line."""
+    return ", ".join(sorted(m.value for m in methods)) if methods else "none"
 
-    ESC10: when a DC has StrongCertificateBindingEnforcement disabled or
-    permissive, and allows weak certificate mapping methods (Subject, IssuerSerial,
-    or altSecurityIdentities), an attacker who obtains a certificate can map it to
-    a different (higher-privilege) account. We flag the enabling DC registry
-    configuration; the actual mapping attack is out of scope.
+
+def _dc_registry_not_evaluated(label: str) -> Finding:
+    """The shared degrade-to-note finding when the esc10-dc-registry pass is absent."""
+    return Finding(
+        check="DC_REGISTRY_NOT_EVALUATED",
+        severity=Severity.INFO,
+        title="DC certificate mapping configuration not evaluated",
+        subject="(estate)",
+        detail=(
+            f"The export did not include DC registry values, so {label} was skipped. "
+            "Re-run a collector that captures the DC registry: "
+            "StrongCertificateBindingEnforcement (KDC) and CertificateMappingMethods (Schannel)."
+        ),
+        source="collector-manifest.json: skipped_passes contains 'esc10-dc-registry'",
+    )
+
+
+def detect_esc10(estate: Estate) -> list[Finding]:
+    """Flag DCs whose certificate-mapping configuration enables ESC10.
+
+    Two registry-backed cases (SpecterOps "Certified Pre-Owned" + KB5014754):
+      case 1 (HIGH): Schannel ``CertificateMappingMethods`` has the UPN bit (0x4)
+        — a certificate's UPN SAN alone maps to an account.
+      case 2 (HIGH): KDC ``StrongCertificateBindingEnforcement`` is Disabled —
+        weak/implicit mappings are accepted (the ESC9 path opens up).
+    Compatibility mode (permissive) without the UPN bit is a transitional weakness
+    (MEDIUM); strict enforcement with no UPN bit is clear. We flag the enabling
+    configuration; the mapping attack itself is out of scope.
 
     Degrades to a note when the DC registry pass was not collected.
     """
     if _ESC10_DC_REGISTRY_PASS in estate.manifest.skipped_passes:
-        return [
-            Finding(
-                check="DC_REGISTRY_NOT_EVALUATED",
-                severity=Severity.INFO,
-                title="DC certificate mapping configuration not evaluated",
-                subject="(estate)",
-                detail=(
-                    "The export did not include DC registry values, so ESC10 "
-                    "(weak certificate mapping) was skipped. Re-run a collector "
-                    "that captures DC registry: StrongCertificateBindingEnforcement "
-                    "and CertificateMappingMethods."
-                ),
-                source="collector-manifest.json: skipped_passes contains 'esc10-dc-registry'",
-            )
-        ]
+        return [_dc_registry_not_evaluated("ESC10 (weak certificate mapping)")]
     findings: list[Finding] = []
     for dc in estate.dcs:
-        if dc.strong_certificate_binding_enforcement not in _STRONG_BINDING_VULNERABLE:
-            continue  # Strict enforcement is on - weak mappings are mitigated
-            # UNKNOWN is also excluded (not asserting vulnerability)
-        weak_methods = dc.certificate_mapping_methods & _WEAK_MAPPING_METHODS
-        if not weak_methods:
-            continue  # No weak methods enabled
-        method_names = ", ".join(sorted(m.value for m in weak_methods))
-        findings.append(
-            Finding(
-                check="ESC10",
-                severity=Severity.HIGH,
-                title="DC allows weak certificate mapping with lax enforcement",
-                subject=dc.name,
-                detail=(
-                    f"StrongCertificateBindingEnforcement is "
-                    f"'{dc.strong_certificate_binding_enforcement.value}' and weak mapping "
-                    f"method(s) {method_names} are enabled. An attacker with a certificate "
-                    "can map it to a privileged account. Set StrongCertificateBindingEnforcement "
-                    "to 1 (Strict) and restrict CertificateMappingMethods to "
-                    "SubjectIssuerSerial or remove weak methods."
-                ),
-                source=(
-                    f"DC '{dc.name}': "
-                    f"StrongCertificateBindingEnforcement + CertificateMappingMethods"
-                ),
+        binding = dc.strong_certificate_binding_enforcement
+        upn_mapping = SchannelMappingMethod.UPN in dc.schannel_mapping_methods
+        reasons: list[str] = []
+        if upn_mapping:
+            reasons.append(
+                "Schannel CertificateMappingMethods enables UPN mapping (0x4), so a "
+                "certificate carrying a victim's UPN in its SAN maps to that account"
             )
-        )
-    # Note: DCs with UNKNOWN enforcement are not flagged as ESC10 (avoids false HIGH).
-    # If they also allow altSecurityIdentities, ESC14 will surface an ENFORCEMENT_UNKNOWN note.
+        if binding == StrongCertBinding.DISABLED:
+            reasons.append(
+                "StrongCertificateBindingEnforcement is Disabled (0), so weak/implicit "
+                "certificate mappings are accepted"
+            )
+        if reasons:
+            findings.append(
+                Finding(
+                    check="ESC10",
+                    severity=Severity.HIGH,
+                    title="DC accepts weak certificate mappings",
+                    subject=dc.name,
+                    detail=(
+                        f"{'; '.join(reasons)}. An attacker who can influence the mapped "
+                        "field can authenticate as another account. Set "
+                        "StrongCertificateBindingEnforcement to 2 (Full) and clear the UPN "
+                        "bit from Schannel CertificateMappingMethods."
+                    ),
+                    source=(
+                        f"DC '{dc.name}': StrongCertificateBindingEnforcement="
+                        f"{binding.value}, Schannel CertificateMappingMethods="
+                        f"{_schannel_method_list(dc.schannel_mapping_methods)}"
+                    ),
+                )
+            )
+            continue
+        if binding == StrongCertBinding.PERMISSIVE:
+            findings.append(
+                Finding(
+                    check="ESC10",
+                    severity=Severity.MEDIUM,
+                    title="DC certificate binding is in compatibility mode",
+                    subject=dc.name,
+                    detail=(
+                        "StrongCertificateBindingEnforcement is Compatibility (1): the DC "
+                        "attempts strong mapping but still accepts weak mappings for accounts "
+                        "that predate the certificate. Move to 2 (Full) once all certificates "
+                        "carry the SID extension."
+                    ),
+                    source=(
+                        f"DC '{dc.name}': StrongCertificateBindingEnforcement={binding.value}"
+                    ),
+                )
+            )
+            continue
+        if binding == StrongCertBinding.UNKNOWN:
+            findings.append(
+                Finding(
+                    check="ESC10_ENFORCEMENT_UNKNOWN",
+                    severity=Severity.INFO,
+                    title="DC StrongCertificateBindingEnforcement not read",
+                    subject=dc.name,
+                    detail=(
+                        "The Schannel mapping methods were read but "
+                        "StrongCertificateBindingEnforcement could not be. ESC10 case 2 "
+                        "cannot be ruled out. Re-collect with registry read rights on the DC."
+                    ),
+                    source=f"DC '{dc.name}': StrongCertificateBindingEnforcement unreadable",
+                )
+            )
     return findings
 
 
-def _looks_like_x509_mapping(mapping: str) -> bool:
-    """Heuristic: does this altSecurityIdentities value look like an X.509 cert mapping?"""
-    mapping_upper = mapping.upper().strip()
-    return any(mapping_upper.startswith(prefix) for prefix in _X509_PREFIXES)
+def _x509_mapping_form(mapping: str) -> X509MappingForm:
+    """Classify one altSecurityIdentities value into its X.509 mapping form.
+
+    Returns :attr:`X509MappingForm.UNKNOWN` for non-X.509 values (e.g. ``Kerberos:``)
+    or unrecognized shapes. The bracketed tokens (``<SKI>``, ``<I>``/``<S>``/``<SR>``,
+    etc.) are the documented certificateUserIds syntax.
+    """
+    text = mapping.strip()
+    if not text.upper().startswith("X509:"):
+        return X509MappingForm.UNKNOWN
+    body = text.upper()
+    if "<SKI>" in body:
+        return X509MappingForm.SKI
+    if "<SHA1-PUKEY>" in body:
+        return X509MappingForm.SHA1_PUBLIC_KEY
+    if "<RFC822>" in body:
+        return X509MappingForm.RFC822
+    if "<PN>" in body:
+        return X509MappingForm.PRINCIPAL_NAME
+    if "<I>" in body:
+        # Issuer present: pair with serial (strong) or subject (weak). Issuer-only
+        # is not a supported mapping.
+        if "<SR>" in body:
+            return X509MappingForm.ISSUER_SERIAL
+        if "<S>" in body:
+            return X509MappingForm.ISSUER_SUBJECT
+        return X509MappingForm.UNKNOWN
+    if "<S>" in body:
+        return X509MappingForm.SUBJECT_ONLY
+    return X509MappingForm.UNKNOWN
 
 
 def detect_esc14(estate: Estate) -> list[Finding]:
-    """Flag principals with explicit X.509 cert mappings in altSecurityIdentities.
+    """Flag principals with *weak* explicit X.509 mappings in altSecurityIdentities.
 
-    ESC14: when a principal (user or computer) has altSecurityIdentities values
-    that map X.509 certificate fields (subject, issuer, serial, etc.) to the
-    principal, and the DC allows CertificateMappingMethods with
-    altSecurityIdentities enabled AND has non-strict StrongCertificateBindingEnforcement,
-    an attacker who obtains a matching certificate can authenticate as that principal.
-    We flag the enabling configuration; the actual mapping attack is out of scope.
+    ESC14: a principal whose altSecurityIdentities holds a weak (reusable) X.509
+    mapping form — subject-only, issuer+subject, RFC822/email, or UPN — can be
+    impersonated by anyone who obtains a certificate matching those reusable fields,
+    unless the DC enforces strong binding. Strong (nonreusable) forms — issuer+serial,
+    SKI, SHA1 public key — are not flagged. Exploitability also requires a DC whose
+    StrongCertificateBindingEnforcement is not strict.
 
-    Only mappings that look like X.509 cert mappings (contain X509: prefix,
-    <X509:...> bracketed form) are flagged — Kerberos/UPN principals in
-    altSecurityIdentities are a different mechanism and not ESC14.
-
-    Degrades to a note when the altSecurityIdentities pass or DC registry pass
-    was not collected.
+    Degrades to a note when the altSecurityIdentities pass was not collected, and to
+    an INFO note when DC enforcement could not be determined.
     """
     if _ESC14_ALTSECID_PASS in estate.manifest.skipped_passes:
         return [
@@ -805,104 +863,76 @@ def detect_esc14(estate: Estate) -> list[Finding]:
                 subject="(estate)",
                 detail=(
                     "The export did not include principal altSecurityIdentities, so ESC14 "
-                    "(weak explicit cert mapping) was skipped. Re-run a collector "
-                    "that captures AD principal altSecurityIdentities."
+                    "(weak explicit cert mapping) was skipped. Re-run a collector that "
+                    "captures AD principal altSecurityIdentities."
                 ),
                 source="collector-manifest.json: skipped_passes contains 'esc14-altsecid'",
             )
         ]
-    # ESC14 also requires DC registry to evaluate enforcement level.
-    if _ESC10_DC_REGISTRY_PASS in estate.manifest.skipped_passes:
-        return [
-            Finding(
-                check="DC_REGISTRY_NOT_EVALUATED",
-                severity=Severity.INFO,
-                title="DC certificate mapping configuration not evaluated (required for ESC14)",
-                subject="(estate)",
-                detail=(
-                    "The export did not include DC registry values, so ESC14 "
-                    "(weak explicit cert mapping) could not be evaluated. Re-run a collector "
-                    "that captures DC registry: StrongCertificateBindingEnforcement "
-                    "and CertificateMappingMethods."
-                ),
-                source="collector-manifest.json: skipped_passes contains 'esc10-dc-registry'",
-            )
-        ]
-    if not estate.dcs:
-        # DC registry pass ran but produced zero DCs — likely a collector issue.
-        return [
-            Finding(
-                check="ESC14_NO_DC_DATA",
-                severity=Severity.INFO,
-                title="No DC configuration data available for ESC14 evaluation",
-                subject="(estate)",
-                detail=(
-                    "The DC registry pass ran but produced no DC entries. This may indicate "
-                    "a collector issue or an unexpected AD configuration. ESC14 cannot be "
-                    "evaluated without DC configuration."
-                ),
-                source="dc-config.json: zero DC entries",
-            )
-        ]
-    # Only flag if at least one DC allows altSecurityIdentities AND has
-    # non-strict enforcement (the mapping can actually be exploited).
-    # UNKNOWN enforcement is NOT treated as vulnerable (avoids false HIGH).
-    vulnerable_dcs = [
+    # Find principals carrying at least one weak (reusable) X.509 mapping form.
+    weak_principals: list[tuple[str, list[str]]] = []
+    for principal in estate.principal_mappings:
+        weak = [m for m in principal.mappings if _x509_mapping_form(m) in WEAK_X509_MAPPING_FORMS]
+        if weak:
+            weak_principals.append((principal.dn, weak))
+    if not weak_principals:
+        return []  # only strong / non-X.509 mappings — nothing exploitable
+
+    # Exploitability depends on a DC with non-strict enforcement.
+    non_strict_dcs = [
         dc for dc in estate.dcs
-        if CertMappingMethod.ALT_SECURITY_IDENTITIES in dc.certificate_mapping_methods
-        and dc.strong_certificate_binding_enforcement in _STRONG_BINDING_VULNERABLE
+        if dc.strong_certificate_binding_enforcement in _BINDING_NON_STRICT
     ]
-    if not vulnerable_dcs:
-        # No definitely-vulnerable DCs. If there are DCs with UNKNOWN enforcement
-        # that allow altSecurityIdentities, emit a note rather than asserting HIGH.
-        unknown_dcs = [
-            dc for dc in estate.dcs
-            if CertMappingMethod.ALT_SECURITY_IDENTITIES in dc.certificate_mapping_methods
-            and dc.strong_certificate_binding_enforcement == StrongCertBinding.UNKNOWN
-        ]
-        if unknown_dcs:
-            unknown_names = ", ".join(sorted(dc.name for dc in unknown_dcs))
+    if not non_strict_dcs:
+        registry_uncertain = (
+            _ESC10_DC_REGISTRY_PASS in estate.manifest.skipped_passes
+            or not estate.dcs
+            or any(
+                dc.strong_certificate_binding_enforcement == StrongCertBinding.UNKNOWN
+                for dc in estate.dcs
+            )
+        )
+        if registry_uncertain:
+            names = ", ".join(sorted(dn for dn, _ in weak_principals))
             return [
                 Finding(
                     check="ESC14_ENFORCEMENT_UNKNOWN",
                     severity=Severity.INFO,
-                    title="DC enforcement state unknown for altSecurityIdentities mapping",
+                    title="Weak altSecurityIdentities mappings present; DC enforcement unknown",
                     subject="(estate)",
                     detail=(
-                        f"DC(s) {unknown_names} allow CertificateMappingMethods with "
-                        f"altSecurityIdentities but StrongCertificateBindingEnforcement "
-                        f"could not be read. ESC14 exploitability is uncertain. Re-collect "
-                        f"with adequate registry read rights on these DCs."
+                        f"Principal(s) {names} carry weak (reusable) altSecurityIdentities "
+                        "mappings, but StrongCertificateBindingEnforcement could not be "
+                        "confirmed non-strict (DC registry pass missing, no DCs collected, or "
+                        "the value was unreadable). ESC14 exploitability is uncertain — "
+                        "re-collect DC registry to resolve."
                     ),
-                    source=f"DC(s) {unknown_names}: StrongCertificateBindingEnforcement",
+                    source="principal-mappings.json + dc-config.json (enforcement unresolved)",
                 )
             ]
-        return []
-    vulnerable_dc_names = ", ".join(sorted(dc.name for dc in vulnerable_dcs))
+        return []  # every DC enforces strong binding — weak mappings are mitigated
+
+    dc_names = ", ".join(sorted(dc.name for dc in non_strict_dcs))
     findings: list[Finding] = []
-    for principal in estate.principal_mappings:
-        x509_mappings = [m for m in principal.mappings if _looks_like_x509_mapping(m)]
-        if not x509_mappings:
-            continue
-        shown = x509_mappings[:3]
-        mapping_preview = ", ".join(f"'{m}'" for m in shown)
-        suffix = f" (and {len(x509_mappings) - 3} more)" if len(x509_mappings) > 3 else ""
+    for dn, weak in sorted(weak_principals):
+        shown = weak[:3]
+        preview = ", ".join(f"'{m}'" for m in shown)
+        suffix = f" (and {len(weak) - 3} more)" if len(weak) > 3 else ""
         findings.append(
             Finding(
                 check="ESC14",
                 severity=Severity.HIGH,
-                title="Principal has explicit X.509 certificate mappings (altSecurityIdentities)",
-                subject=principal.dn,
+                title="Principal has a weak explicit certificate mapping (altSecurityIdentities)",
+                subject=dn,
                 detail=(
-                    f"Principal has {len(x509_mappings)} X.509-like altSecurityIdentities "
-                    f"mapping(s) [{mapping_preview}{suffix}] and DC(s) {vulnerable_dc_names} "
-                    f"allow CertificateMappingMethods with altSecurityIdentities while "
-                    f"StrongCertificateBindingEnforcement is not Strict. An attacker with a "
-                    f"matching certificate can authenticate as this principal. Remove explicit "
-                    f"mappings or set StrongCertificateBindingEnforcement to 1 (Strict) and "
-                    f"disable altSecurityIdentities in DC CertificateMappingMethods."
+                    f"Principal has {len(weak)} weak (reusable) altSecurityIdentities mapping(s) "
+                    f"[{preview}{suffix}] and DC(s) {dc_names} do not enforce strong certificate "
+                    "binding. An attacker who obtains a certificate matching those reusable "
+                    "fields can authenticate as this principal. Replace with a strong "
+                    "(nonreusable) mapping — issuer+serial, SKI, or SHA1-PUKEY — and set "
+                    "StrongCertificateBindingEnforcement to 2 (Full)."
                 ),
-                source=f"Principal '{principal.dn}': altSecurityIdentities",
+                source=f"Principal '{dn}': altSecurityIdentities",
             )
         )
     return findings

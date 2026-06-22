@@ -26,7 +26,6 @@ from adcs_lens.model import (
     CertAuthority,
     CertKind,
     CertLifecycle,
-    CertMappingMethod,
     CertTemplate,
     Crl,
     CrlTier,
@@ -39,6 +38,7 @@ from adcs_lens.model import (
     Manifest,
     PkiObjectAcl,
     PrincipalMapping,
+    SchannelMappingMethod,
     StrongCertBinding,
 )
 from adcs_lens.normalize import normalize_sid
@@ -278,9 +278,9 @@ def ingest(export_dir: str | Path) -> Estate:
                 "StrongCertificateBindingEnforcement",
                 default="unknown",
             ),
-            certificate_mapping_methods=frozenset(
-                _kind(m, CertMappingMethod, "CertificateMappingMethod", default="unknown")
-                for m in d.get("certificate_mapping_methods", [])
+            schannel_mapping_methods=frozenset(
+                _kind(m, SchannelMappingMethod, "SchannelMappingMethod", default="unknown")
+                for m in d.get("schannel_mapping_methods", [])
             ),
         )
         for d in _require_list(base, "dc-config.json", _load(base, "dc-config.json"))

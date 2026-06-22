@@ -28,7 +28,6 @@ from adcs_lens.model import (
     CertAuthority,
     CertKind,
     CertLifecycle,
-    CertMappingMethod,
     CertTemplate,
     Crl,
     CrlTier,
@@ -41,6 +40,7 @@ from adcs_lens.model import (
     Manifest,
     PkiObjectAcl,
     PrincipalMapping,
+    SchannelMappingMethod,
     Severity,
     StrongCertBinding,
 )
@@ -186,13 +186,13 @@ def _estate(
 def _dc(
     name: str = "DC01",
     *,
-    strong_binding: StrongCertBinding = StrongCertBinding.PERMISSIVE,
-    mapping_methods: tuple[CertMappingMethod, ...] = (CertMappingMethod.SUBJECT,),
+    strong_binding: StrongCertBinding = StrongCertBinding.DISABLED,
+    schannel_methods: tuple[SchannelMappingMethod, ...] = (),
 ) -> DcConfiguration:
     return DcConfiguration(
         name=name,
         strong_certificate_binding_enforcement=strong_binding,
-        certificate_mapping_methods=frozenset(mapping_methods),
+        schannel_mapping_methods=frozenset(schannel_methods),
     )
 
 
@@ -475,15 +475,29 @@ def test_esc9_evaluates_even_without_template_security() -> None:
 # --- ESC10 -----------------------------------------------------------------
 
 
-def test_esc10_flagged_when_weak_mapping_and_lax_enforcement() -> None:
+def test_esc10_flagged_when_binding_disabled() -> None:
+    """Case 2: StrongCertificateBindingEnforcement Disabled -> HIGH."""
+    from adcs_lens.detection import detect_esc10
+
+    estate = _estate(dcs=(_dc("WeakDC", strong_binding=StrongCertBinding.DISABLED),))
+    findings = detect_esc10(estate)
+    assert len(findings) == 1
+    assert findings[0].check == "ESC10"
+    assert findings[0].severity == Severity.HIGH
+    assert findings[0].subject == "WeakDC"
+    assert "disabled" in findings[0].detail.lower()
+
+
+def test_esc10_flagged_when_schannel_upn_bit_set() -> None:
+    """Case 1: Schannel UPN mapping bit -> HIGH even under strict binding."""
     from adcs_lens.detection import detect_esc10
 
     estate = _estate(
         dcs=(
             _dc(
-                "WeakDC",
-                strong_binding=StrongCertBinding.PERMISSIVE,
-                mapping_methods=(CertMappingMethod.SUBJECT, CertMappingMethod.ISSUER_SERIAL),
+                "UpnDC",
+                strong_binding=StrongCertBinding.STRICT,
+                schannel_methods=(SchannelMappingMethod.UPN,),
             ),
         )
     )
@@ -491,30 +505,10 @@ def test_esc10_flagged_when_weak_mapping_and_lax_enforcement() -> None:
     assert len(findings) == 1
     assert findings[0].check == "ESC10"
     assert findings[0].severity == Severity.HIGH
-    assert findings[0].subject == "WeakDC"
-    assert "subject" in findings[0].detail.lower()
-    assert "issuer_serial" in findings[0].detail.lower()
+    assert "upn" in findings[0].detail.lower()
 
 
-def test_esc10_flagged_when_altsecid_enabled() -> None:
-    from adcs_lens.detection import detect_esc10
-
-    estate = _estate(
-        dcs=(
-            _dc(
-                "WeakDC2",
-                strong_binding=StrongCertBinding.DISABLED,
-                mapping_methods=(CertMappingMethod.ALT_SECURITY_IDENTITIES,),
-            ),
-        )
-    )
-    findings = detect_esc10(estate)
-    assert len(findings) == 1
-    assert findings[0].check == "ESC10"
-    assert "alt_security_identities" in findings[0].detail.lower()
-
-
-def test_esc10_not_flagged_when_strict_enforcement() -> None:
+def test_esc10_not_flagged_when_strict_and_no_upn() -> None:
     from adcs_lens.detection import detect_esc10
 
     estate = _estate(
@@ -522,26 +516,33 @@ def test_esc10_not_flagged_when_strict_enforcement() -> None:
             _dc(
                 "StrongDC",
                 strong_binding=StrongCertBinding.STRICT,
-                mapping_methods=(CertMappingMethod.SUBJECT, CertMappingMethod.ISSUER_SERIAL),
+                schannel_methods=(SchannelMappingMethod.S4U2SELF,),
             ),
         )
     )
     assert detect_esc10(estate) == []
 
 
-def test_esc10_not_flagged_when_no_weak_methods() -> None:
+def test_esc10_permissive_is_medium() -> None:
+    """Compatibility mode without the UPN bit is a transitional MEDIUM."""
     from adcs_lens.detection import detect_esc10
 
-    estate = _estate(
-        dcs=(
-            _dc(
-                "StrongDC2",
-                strong_binding=StrongCertBinding.PERMISSIVE,
-                mapping_methods=(CertMappingMethod.SUBJECT_ISSUER_SERIAL,),
-            ),
-        )
-    )
-    assert detect_esc10(estate) == []
+    estate = _estate(dcs=(_dc("CompatDC", strong_binding=StrongCertBinding.PERMISSIVE),))
+    findings = detect_esc10(estate)
+    assert len(findings) == 1
+    assert findings[0].check == "ESC10"
+    assert findings[0].severity == Severity.MEDIUM
+    assert "compatibility" in findings[0].detail.lower()
+
+
+def test_esc10_unknown_enforcement_emits_note_not_high() -> None:
+    from adcs_lens.detection import detect_esc10
+
+    estate = _estate(dcs=(_dc("DC-UNKNOWN", strong_binding=StrongCertBinding.UNKNOWN),))
+    findings = detect_esc10(estate)
+    assert len(findings) == 1
+    assert findings[0].check == "ESC10_ENFORCEMENT_UNKNOWN"
+    assert findings[0].severity == Severity.INFO
 
 
 def test_esc10_degrades_when_pass_skipped() -> None:
@@ -561,30 +562,28 @@ def test_esc10_clean_when_pass_ran_and_no_dcs() -> None:
 
 
 def test_run_all_includes_esc10() -> None:
-    estate = _estate(dcs=(_dc("DC01", strong_binding=StrongCertBinding.PERMISSIVE),))
+    estate = _estate(dcs=(_dc("DC01", strong_binding=StrongCertBinding.DISABLED),))
     assert "ESC10" in {f.check for f in run_all(estate)}
 
 
 # --- ESC14 -----------------------------------------------------------------
 
 
-def test_esc14_flagged_when_x509_mapping_and_dc_allows() -> None:
+def _weak_dc() -> DcConfiguration:
+    return _dc("DC01", strong_binding=StrongCertBinding.DISABLED)
+
+
+def test_esc14_flagged_when_weak_form_and_non_strict_dc() -> None:
     from adcs_lens.detection import detect_esc14
 
     estate = _estate(
-        dcs=(
-            _dc(
-                "DC01",
-                strong_binding=StrongCertBinding.PERMISSIVE,
-                mapping_methods=(CertMappingMethod.ALT_SECURITY_IDENTITIES,),
-            ),
-        ),
+        dcs=(_weak_dc(),),
         principal_mappings=(
             PrincipalMapping(
                 dn="CN=Service Account,OU=SA,DC=test",
                 mappings=(
-                    "X509:<I>CN=CA<S>CN=Service Account",
-                    "CN=Service Account,OU=SA,DC=test",
+                    "X509:<I>CN=CA<S>CN=Service Account",  # issuer+subject = weak
+                    "CN=Service Account,OU=SA,DC=test",  # non-X.509, ignored
                 ),
             ),
         ),
@@ -594,27 +593,21 @@ def test_esc14_flagged_when_x509_mapping_and_dc_allows() -> None:
     assert findings[0].check == "ESC14"
     assert findings[0].severity == Severity.HIGH
     assert "Service Account" in findings[0].subject
-    assert "X.509" in findings[0].detail
 
 
-def test_esc14_not_flagged_when_no_x509_mappings() -> None:
+def test_esc14_not_flagged_for_strong_forms_only() -> None:
+    """The KB5014754 correction: issuer+serial and SKI are STRONG, never flagged."""
     from adcs_lens.detection import detect_esc14
 
-    # Only Kerberos/UPN mappings - not ESC14
     estate = _estate(
-        dcs=(
-            _dc(
-                "DC01",
-                strong_binding=StrongCertBinding.PERMISSIVE,
-                mapping_methods=(CertMappingMethod.ALT_SECURITY_IDENTITIES,),
-            ),
-        ),
+        dcs=(_weak_dc(),),
         principal_mappings=(
             PrincipalMapping(
-                dn="CN=Regular User,OU=Users,DC=test",
+                dn="CN=Strong,DC=test",
                 mappings=(
-                    "kerberos:user@TEST.LOCAL",
-                    "upn:user@test.local",
+                    "X509:<I>CN=CA<SR>1200AABBCC",  # issuer+serial = strong
+                    "X509:<SKI>aB1cD2eF3",  # SKI = strong
+                    "X509:<SHA1-PUKEY>cD2eF3",  # SHA1 public key = strong
                 ),
             ),
         ),
@@ -622,17 +615,26 @@ def test_esc14_not_flagged_when_no_x509_mappings() -> None:
     assert detect_esc14(estate) == []
 
 
-def test_esc14_not_flagged_when_dc_disallows_altsecid() -> None:
+def test_esc14_not_flagged_when_no_x509_mappings() -> None:
     from adcs_lens.detection import detect_esc14
 
     estate = _estate(
-        dcs=(
-            _dc(
-                "DC01",
-                strong_binding=StrongCertBinding.STRICT,
-                mapping_methods=(CertMappingMethod.SUBJECT_ISSUER_SERIAL,),
+        dcs=(_weak_dc(),),
+        principal_mappings=(
+            PrincipalMapping(
+                dn="CN=Regular User,OU=Users,DC=test",
+                mappings=("kerberos:user@TEST.LOCAL",),
             ),
         ),
+    )
+    assert detect_esc14(estate) == []
+
+
+def test_esc14_not_flagged_when_all_dcs_strict() -> None:
+    from adcs_lens.detection import detect_esc14
+
+    estate = _estate(
+        dcs=(_dc("DC01", strong_binding=StrongCertBinding.STRICT),),
         principal_mappings=(
             PrincipalMapping(
                 dn="CN=Service Account,OU=SA,DC=test",
@@ -646,24 +648,14 @@ def test_esc14_not_flagged_when_dc_disallows_altsecid() -> None:
 def test_esc14_not_flagged_when_no_principal_mappings() -> None:
     from adcs_lens.detection import detect_esc14
 
-    estate = _estate(
-        dcs=(
-            _dc(
-                "DC01",
-                strong_binding=StrongCertBinding.PERMISSIVE,
-                mapping_methods=(CertMappingMethod.ALT_SECURITY_IDENTITIES,),
-            ),
-        ),
-        principal_mappings=(),
-    )
-    assert detect_esc14(estate) == []
+    assert detect_esc14(_estate(dcs=(_weak_dc(),), principal_mappings=())) == []
 
 
 def test_esc14_degrades_when_pass_skipped() -> None:
     from adcs_lens.detection import detect_esc14
 
     estate = _estate(
-        dcs=(_dc("DC01", strong_binding=StrongCertBinding.PERMISSIVE),),
+        dcs=(_weak_dc(),),
         principal_mappings=(
             PrincipalMapping(
                 dn="CN=Service Account,OU=SA,DC=test",
@@ -681,136 +673,79 @@ def test_esc14_degrades_when_pass_skipped() -> None:
 def test_esc14_clean_when_pass_ran_and_no_mappings() -> None:
     from adcs_lens.detection import detect_esc14
 
-    # Provide DCs so the no-DC-data note doesn't fire
-    assert detect_esc14(
-        _estate(
-            dcs=(_dc("DC01", strong_binding=StrongCertBinding.STRICT),),
-            principal_mappings=(),
-        )
-    ) == []
+    assert detect_esc14(_estate(dcs=(_weak_dc(),), principal_mappings=())) == []
 
 
-def test_esc14_degrades_when_dc_registry_pass_skipped() -> None:
+def test_esc14_enforcement_unknown_when_dc_registry_skipped() -> None:
     from adcs_lens.detection import detect_esc14
 
     estate = _estate(
         dcs=(),
         principal_mappings=(
-            PrincipalMapping(
-                dn="CN=X,DC=test",
-                mappings=("X509:<I>CN=CA<S>CN=X",),
-            ),
+            PrincipalMapping(dn="CN=X,DC=test", mappings=("X509:<S>CN=X",)),
         ),
         skipped_passes=("esc10-dc-registry",),
     )
     findings = detect_esc14(estate)
     assert len(findings) == 1
-    assert findings[0].check == "DC_REGISTRY_NOT_EVALUATED"
+    assert findings[0].check == "ESC14_ENFORCEMENT_UNKNOWN"
     assert findings[0].severity == Severity.INFO
 
 
-def test_esc14_unknown_enforcement_emits_note() -> None:
+def test_esc14_enforcement_unknown_when_binding_unreadable() -> None:
     from adcs_lens.detection import detect_esc14
 
-    # DC allows altSecurityIdentities but enforcement is UNKNOWN -> INFO note
     estate = _estate(
-        dcs=(
-            _dc(
-                "DC-UNKNOWN",
-                strong_binding=StrongCertBinding.UNKNOWN,
-                mapping_methods=(CertMappingMethod.ALT_SECURITY_IDENTITIES,),
-            ),
-        ),
+        dcs=(_dc("DC-UNKNOWN", strong_binding=StrongCertBinding.UNKNOWN),),
         principal_mappings=(
-            PrincipalMapping(
-                dn="CN=X,DC=test",
-                mappings=("X509:<I>CN=CA<S>CN=X",),
-            ),
+            PrincipalMapping(dn="CN=X,DC=test", mappings=("X509:<S>CN=X",)),
         ),
     )
     findings = detect_esc14(estate)
     assert len(findings) == 1
     assert findings[0].check == "ESC14_ENFORCEMENT_UNKNOWN"
     assert findings[0].severity == Severity.INFO
-    assert "DC-UNKNOWN" in findings[0].detail
 
 
-def test_esc10_unknown_enforcement_not_flagged() -> None:
-    from adcs_lens.detection import detect_esc10
+def test_x509_mapping_form_classification() -> None:
+    from adcs_lens.detection import _x509_mapping_form
+    from adcs_lens.model import X509MappingForm
 
-    # ESC10 should NOT flag when enforcement is UNKNOWN
-    estate = _estate(
-        dcs=(
-            _dc(
-                "DC-UNKNOWN",
-                strong_binding=StrongCertBinding.UNKNOWN,
-                mapping_methods=(
-                    CertMappingMethod.SUBJECT,
-                    CertMappingMethod.ALT_SECURITY_IDENTITIES,
-                ),
-            ),
-        ),
-    )
-    assert detect_esc10(estate) == []
-
-
-def test_looks_like_x509_mapping_direct() -> None:
-    from adcs_lens.detection import _looks_like_x509_mapping
-
-    assert _looks_like_x509_mapping("X509:<I>CN=CA<S>CN=Svc") is True
-    assert _looks_like_x509_mapping("<X509:<I>CN=CA<S>CN=Svc>") is True
-    assert _looks_like_x509_mapping("x509:<i>CN=ca<S>svc") is True  # case-insensitive
-    assert _looks_like_x509_mapping("kerberos:u@TEST") is False
-    assert _looks_like_x509_mapping("") is False
-    assert _looks_like_x509_mapping("   ") is False
-    assert _looks_like_x509_mapping("X509FOO:bar") is False
-    assert _looks_like_x509_mapping("CN=Service Account,OU=SA,DC=test") is False
+    assert _x509_mapping_form("X509:<I>CN=CA<S>CN=Svc") is X509MappingForm.ISSUER_SUBJECT
+    assert _x509_mapping_form("X509:<S>CN=Svc") is X509MappingForm.SUBJECT_ONLY
+    assert _x509_mapping_form("X509:<RFC822>u@test") is X509MappingForm.RFC822
+    assert _x509_mapping_form("X509:<PN>u@test") is X509MappingForm.PRINCIPAL_NAME
+    assert _x509_mapping_form("X509:<I>CN=CA<SR>12AB") is X509MappingForm.ISSUER_SERIAL
+    assert _x509_mapping_form("X509:<SKI>aabb") is X509MappingForm.SKI
+    assert _x509_mapping_form("X509:<SHA1-PUKEY>aabb") is X509MappingForm.SHA1_PUBLIC_KEY
+    # case-insensitive prefix; whitespace tolerant
+    assert _x509_mapping_form("  x509:<s>CN=Svc  ") is X509MappingForm.SUBJECT_ONLY
+    # non-X.509 / unrecognized
+    assert _x509_mapping_form("kerberos:u@TEST") is X509MappingForm.UNKNOWN
+    assert _x509_mapping_form("") is X509MappingForm.UNKNOWN
+    assert _x509_mapping_form("X509:<I>CN=CA") is X509MappingForm.UNKNOWN  # issuer-only
 
 
 def test_esc14_empty_mappings_not_flagged() -> None:
     from adcs_lens.detection import detect_esc14
 
     estate = _estate(
-        dcs=(
-            _dc(
-                "DC01",
-                strong_binding=StrongCertBinding.PERMISSIVE,
-                mapping_methods=(CertMappingMethod.ALT_SECURITY_IDENTITIES,),
-            ),
-        ),
-        principal_mappings=(
-            PrincipalMapping(dn="CN=X,DC=test", mappings=()),
-        ),
+        dcs=(_weak_dc(),),
+        principal_mappings=(PrincipalMapping(dn="CN=X,DC=test", mappings=()),),
     )
     assert detect_esc14(estate) == []
 
 
-def test_esc14_multi_dc_only_vulnerable_ones_listed() -> None:
+def test_esc14_lists_only_non_strict_dcs() -> None:
     from adcs_lens.detection import detect_esc14
 
     estate = _estate(
         dcs=(
-            _dc(
-                "VULN-DC",
-                strong_binding=StrongCertBinding.PERMISSIVE,
-                mapping_methods=(CertMappingMethod.ALT_SECURITY_IDENTITIES,),
-            ),
-            _dc(
-                "SAFE-DC",
-                strong_binding=StrongCertBinding.STRICT,
-                mapping_methods=(CertMappingMethod.ALT_SECURITY_IDENTITIES,),
-            ),
-            _dc(
-                "UNKNOWN-DC",
-                strong_binding=StrongCertBinding.UNKNOWN,
-                mapping_methods=(CertMappingMethod.ALT_SECURITY_IDENTITIES,),
-            ),
+            _dc("VULN-DC", strong_binding=StrongCertBinding.DISABLED),
+            _dc("SAFE-DC", strong_binding=StrongCertBinding.STRICT),
         ),
         principal_mappings=(
-            PrincipalMapping(
-                dn="CN=X,DC=test",
-                mappings=("X509:<I>CN=CA<S>CN=X",),
-            ),
+            PrincipalMapping(dn="CN=X,DC=test", mappings=("X509:<S>CN=X",)),
         ),
     )
     findings = detect_esc14(estate)
@@ -818,38 +753,11 @@ def test_esc14_multi_dc_only_vulnerable_ones_listed() -> None:
     assert findings[0].check == "ESC14"
     assert "VULN-DC" in findings[0].detail
     assert "SAFE-DC" not in findings[0].detail
-    # UNKNOWN DC should NOT be in the ESC14 detail (it's not vulnerable)
-    # but ESC14 should also not flag it as vulnerable
-
-
-def test_esc14_no_dc_data_emits_note() -> None:
-    from adcs_lens.detection import detect_esc14
-
-    # DC registry pass ran but produced zero DCs
-    estate = _estate(
-        dcs=(),
-        principal_mappings=(
-            PrincipalMapping(
-                dn="CN=X,DC=test",
-                mappings=("X509:<I>CN=CA<S>CN=X",),
-            ),
-        ),
-    )
-    findings = detect_esc14(estate)
-    assert len(findings) == 1
-    assert findings[0].check == "ESC14_NO_DC_DATA"
-    assert findings[0].severity == Severity.INFO
 
 
 def test_run_all_includes_esc14() -> None:
     estate = _estate(
-        dcs=(
-            _dc(
-                "DC01",
-                strong_binding=StrongCertBinding.PERMISSIVE,
-                mapping_methods=(CertMappingMethod.ALT_SECURITY_IDENTITIES,),
-            ),
-        ),
+        dcs=(_weak_dc(),),
         principal_mappings=(
             PrincipalMapping(
                 dn="CN=Service Account,OU=SA,DC=test",
