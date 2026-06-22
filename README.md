@@ -124,16 +124,19 @@ adcs-lens doctor C:\AdcsExport --json     # stable JSON envelope
 > (`-CollectDcMapping`: `esc10-dc-registry` via WMI StdRegProv against each DC,
 > `esc14-altsecid` via LDAP) are built and **validated live** against the lab —
 > DC discovery, remote registry read, and altSecurityIdentities read all confirmed
-> end-to-end. ESC15 is still planned (see open work items).
+> end-to-end. **ESC15** (EKUwu / CVE-2024-49019) flags schema v1 templates a
+> low-priv principal can enroll in, since the requester can inject application
+> policies on an unpatched CA.
 
 ## Status
 
-Core built (Plan 001 Phases 0, 1, 2, 3) with ESC1/2/3/4/5/6/7/8/9/10/11/13/14
-detectors and infrastructure cert/CRL-expiry checks. The collector — including
-the opt-in ESC10/ESC14 DC certificate-mapping passes — is validated against the
-live lab. Remaining: ESC15 (EKUwu) and a live *positive* (vulnerable-config)
-validation for ESC10/ESC14 (the lab is in a secure default state, so they were
-negative-validated live and positive-validated on the synthetic fixture).
+Core built (Plan 001 Phases 0, 1, 2, 3) with ESC1/2/3/4/5/6/7/8/9/10/11/13/14/15
+detectors and infrastructure cert/CRL-expiry checks — the full ESC family the
+threat model marks statically detectable. The collector — including the opt-in
+ESC10/ESC14 DC certificate-mapping passes — is validated against the live lab.
+Remaining: a live *positive* (vulnerable-config) validation for the newer
+detectors (ESC10/11/13/14 were negative-validated live and positive-validated on
+the synthetic fixture) and the Stance-2 export-diff drift feature (WI-001).
 Foundational docs:
 - [`docs/threat-model.md`](docs/threat-model.md) — the ESC + hygiene catalogue
   with the static-detectability boundary. **Start here.**

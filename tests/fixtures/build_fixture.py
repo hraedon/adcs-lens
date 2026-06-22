@@ -124,7 +124,29 @@ def build_export(
                         "ace_type": "Allow",
                     }
                 ],
-            }
+            },
+            {
+                # ESC15 (EKUwu): a schema v1 template, low-priv enrollable, no
+                # manager approval. Server-Auth EKU and no supplies-subject keep it
+                # clear of ESC1/ESC2 — the EKUwu risk is the v1 schema itself.
+                "name": "LegacyV1WebServer",
+                "display_name": "Legacy V1 Web Server",
+                "schema_version": 1,
+                "oid": "1.3.6.1.4.1.311.21.8.legacyv1",
+                "ekus": ["1.3.6.1.5.5.7.3.1"],  # Server Auth
+                "name_flags": [],
+                "enrollment_flags": [],
+                "min_key_size": 2048,
+                "issuance_policy_oids": [],
+                "security": [
+                    {
+                        "trustee_sid": LOW_PRIV_SID,
+                        "trustee_name": "Domain Users",
+                        "rights": ["Enroll"],
+                        "ace_type": "Allow",
+                    }
+                ],
+            },
         ],
     )
 

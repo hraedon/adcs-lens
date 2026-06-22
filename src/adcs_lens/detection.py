@@ -1083,6 +1083,58 @@ def detect_esc13(estate: Estate) -> list[Finding]:
     return findings
 
 
+def detect_esc15(estate: Estate) -> list[Finding]:
+    """Flag schema v1 templates enrollable by low-priv principals (EKUwu).
+
+    ESC15 / CVE-2024-49019 ("EKUwu"): on a CA without the November 2024 fix, a
+    schema **version 1** template does not constrain the issued certificate's
+    application policies, so an enrollee can inject arbitrary EKUs into the
+    request — e.g. Client Authentication (→ domain auth, ESC1-like) or Certificate
+    Request Agent (→ enroll-on-behalf-of, ESC3-like). Any v1 template a low-priv
+    principal can enroll in is therefore an escalation primitive, regardless of
+    the template's own EKUs. We flag the enabling config (v1 + low-priv enroll, no
+    manager approval); exploitability also requires an unpatched CA, which the
+    finding flags as a thing to confirm (we do not read CA patch state).
+
+    Degrades like ESC1/2/3/4: when template security descriptors were not
+    collected, ESC1 emits the single estate-level note, so this returns nothing.
+    """
+    if not _template_security_collected(estate):
+        return []
+    findings: list[Finding] = []
+    for tmpl in estate.templates:
+        if not tmpl.acl_obtained:
+            continue
+        if tmpl.schema_version != 1:
+            continue
+        if _MANAGER_APPROVAL in tmpl.enrollment_flags:
+            continue
+        enrollers = _low_priv_enrollers(tmpl)
+        if not enrollers:
+            continue
+        who = ", ".join(sorted({a.trustee_name or a.trustee_sid for a in enrollers}))
+        findings.append(
+            Finding(
+                check="ESC15",
+                severity=Severity.HIGH,
+                title="Schema v1 template enrollable by low-priv (EKUwu / CVE-2024-49019)",
+                subject=tmpl.display_name or tmpl.name,
+                detail=(
+                    f"Enrollable by {who}; this is a schema version 1 template with no "
+                    "manager approval. On a CA missing the November 2024 fix for "
+                    "CVE-2024-49019, the requester can inject application policies (EKUs) "
+                    "such as Client Authentication or Certificate Request Agent into the "
+                    "request, turning this into an ESC1/ESC3-style escalation regardless of "
+                    "the template's own EKUs. Confirm the CA is patched; upgrade the "
+                    "template to schema v2+, require manager approval, or restrict enroll "
+                    "rights."
+                ),
+                source=f"template '{tmpl.name}' (oid {tmpl.oid}): schema_version=1 + enroll ACL",
+            )
+        )
+    return findings
+
+
 def detect_infra_cert_expiry(
     estate: Estate,
     *,
@@ -1234,6 +1286,7 @@ def run_all(
         *detect_template_acl_gaps(estate),
         *detect_esc11(estate),
         *detect_esc13(estate),
+        *detect_esc15(estate),
         *detect_infra_cert_expiry(estate, now=now, warn_days=warn_days),
     ]
     findings.sort(key=lambda f: (SEVERITY_RANK[f.severity], f.check, f.subject))

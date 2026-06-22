@@ -20,7 +20,7 @@ def test_manifest_and_counts(json_export: Path) -> None:
     # hyphenated pass name the detectors actually gate on (esc10-dc-registry).
     assert "esc10-dc-registry" not in estate.manifest.skipped_passes
     assert len(estate.cas) == 2
-    assert len(estate.templates) == 1
+    assert len(estate.templates) == 2
     assert len(estate.dcs) == 2
 
 

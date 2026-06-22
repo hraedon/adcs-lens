@@ -72,11 +72,12 @@ def _template(
     issuance_policy_oids: tuple[str, ...] = (),
     security: tuple[AceEntry, ...] = (),
     acl_obtained: bool = True,
+    schema_version: int = 2,
 ) -> CertTemplate:
     return CertTemplate(
         name=name,
         display_name=name,
-        schema_version=2,
+        schema_version=schema_version,
         oid=f"1.3.6.1.4.1.311.21.8.{name}",
         ekus=ekus,
         name_flags=frozenset(name_flags),
@@ -1141,6 +1142,80 @@ def test_esc13_not_flagged_when_oid_absent_from_estate() -> None:
         security=(_enroll_ace(),),
     )
     assert detect_esc13(_estate(templates=(tmpl,), oids=())) == []
+
+
+# --- ESC15 ----------------------------------------------------------------
+
+
+def test_esc15_flagged_for_v1_template_low_priv_enroll() -> None:
+    from adcs_lens.detection import detect_esc15
+
+    # A v1 template with no auth EKU and no supplies-subject is still ESC15: the
+    # requester injects the application policy under EKUwu.
+    tmpl = _template(
+        "WebServerV1",
+        schema_version=1,
+        ekus=("1.3.6.1.5.5.7.3.1",),  # serverAuth — not a client-auth EKU
+        name_flags=(),
+        security=(_enroll_ace(),),
+    )
+    findings = detect_esc15(_estate(templates=(tmpl,)))
+    assert len(findings) == 1
+    assert findings[0].check == "ESC15"
+    assert findings[0].severity == Severity.HIGH
+    assert findings[0].subject == "WebServerV1"
+    assert "CVE-2024-49019" in findings[0].detail
+
+
+def test_esc15_not_flagged_for_v2_template() -> None:
+    from adcs_lens.detection import detect_esc15
+
+    tmpl = _template("ModernTemplate", schema_version=2, security=(_enroll_ace(),))
+    assert detect_esc15(_estate(templates=(tmpl,))) == []
+
+
+def test_esc15_mitigated_by_manager_approval() -> None:
+    from adcs_lens.detection import detect_esc15
+
+    tmpl = _template(
+        "V1Approved",
+        schema_version=1,
+        enrollment_flags=("PEND_ALL_REQUESTS",),
+        security=(_enroll_ace(),),
+    )
+    assert detect_esc15(_estate(templates=(tmpl,))) == []
+
+
+def test_esc15_requires_low_priv_enroll() -> None:
+    from adcs_lens.detection import detect_esc15
+
+    # v1 template but only a high-priv trustee can enroll -> not ESC15.
+    tmpl = _template(
+        "V1Restricted",
+        schema_version=1,
+        security=(_enroll_ace(sid="S-1-5-21-1-2-3-512"),),  # Domain Admins
+    )
+    assert detect_esc15(_estate(templates=(tmpl,))) == []
+
+
+def test_esc15_silent_when_template_security_not_collected() -> None:
+    from adcs_lens.detection import detect_esc15
+
+    tmpl = _template("V1", schema_version=1, security=(_enroll_ace(),))
+    estate = _estate(templates=(tmpl,), skipped_passes=("template-security",))
+    assert detect_esc15(estate) == []
+
+
+def test_esc15_skips_unreadable_template() -> None:
+    from adcs_lens.detection import detect_esc15
+
+    tmpl = _template("V1", schema_version=1, acl_obtained=False, security=())
+    assert detect_esc15(_estate(templates=(tmpl,))) == []
+
+
+def test_run_all_includes_esc15() -> None:
+    tmpl = _template("V1", schema_version=1, security=(_enroll_ace(),))
+    assert "ESC15" in {f.check for f in run_all(_estate(templates=(tmpl,)))}
 
 
 # --- composition ----------------------------------------------------------

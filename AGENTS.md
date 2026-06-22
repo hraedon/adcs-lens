@@ -92,7 +92,10 @@ ESC10/ESC14 DC certificate-mapping passes (`-CollectDcMapping`: `esc14-altsecid`
 LDAP read of principal altSecurityIdentities + `esc10-dc-registry` per-DC KDC
 StrongCertificateBindingEnforcement and Schannel CertificateMappingMethods via
 WMI StdRegProv with explicit creds); validated end-to-end against a live
-enterprise CA. Remaining: ESC15. ESC5 is
+enterprise CA. ESC15 (EKUwu / CVE-2024-49019) flags schema v1 templates a low-priv
+principal can enroll in (the requester injects application policies on an unpatched
+CA) — reuses existing collector data (schema_version + enroll ACL), no new pass.
+The full statically-detectable ESC family is now built. ESC5 is
 negative-validated on the real CA with positive validation via the synthetic
 fixture; ESC8 is **positive-validated on the real CA** (live `/certsrv`
 HTTP+NTLM+no-EPA → HIGH); ESC11/ESC13/ESC10/ESC14 are negative-validated on the
