@@ -51,7 +51,7 @@ def build_export(
             "collected_at": now.isoformat(),
             "host": "LABCA01",
             "domain": DOMAIN,
-            "skipped_passes": ["esc10_dc_registry", "esc14_altsecid"],
+            "skipped_passes": [],
         },
         bom=True,
     )
@@ -192,6 +192,52 @@ def build_export(
                 "windows_auth": True,
                 "auth_providers": ["Kerberos"],
                 "epa": "require",
+            },
+        ],
+    )
+
+    # ESC10: DC registry config. The fixture models a weak configuration
+    # (permissive enforcement + weak mapping methods enabled) to exercise the
+    # detector. A second DC with strict enforcement exercises the negative branch.
+    _write_json(
+        base / "dc-config.json",
+        [
+            {
+                "name": "LAB-DC01",
+                "strong_certificate_binding_enforcement": "permissive",
+                "certificate_mapping_methods": [
+                    "subject",
+                    "issuer_serial",
+                    "alt_security_identities",
+                ],
+            },
+            {
+                "name": "LAB-DC02",
+                "strong_certificate_binding_enforcement": "strict",
+                "certificate_mapping_methods": ["subject_issuer_serial"],
+            },
+        ],
+    )
+
+    # ESC14: Principal altSecurityIdentities. One principal with X.509-like
+    # mappings (should flag), one with only Kerberos/UPN (should not flag).
+    _write_json(
+        base / "principal-mappings.json",
+        [
+            {
+                "dn": "CN=Service Account,OU=Service Accounts,DC=lab,DC=example,DC=com",
+                "mappings": [
+                    "X509:<I>CN=LAB Issuing CA<S>CN=Service Account",
+                    "CN=Service Account,OU=Service Accounts,DC=lab,DC=example,DC=com",
+                    "1.3.6.1.4.1.311.20.2.3=Service Account@lab.example.com",
+                ],
+            },
+            {
+                "dn": "CN=Regular User,OU=Users,DC=lab,DC=example,DC=com",
+                "mappings": [
+                    "kerberos:user@LAB.EXAMPLE.COM",
+                    "upn:user@lab.example.com",
+                ],
             },
         ],
     )

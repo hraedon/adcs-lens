@@ -28,6 +28,10 @@ class Severity(StrEnum):
     INFO = "info"
 
 
+# Worst-to-least rank, derived from the enum's declared order so it cannot drift.
+SEVERITY_RANK: dict[Severity, int] = {sev: i for i, sev in enumerate(Severity)}
+
+
 class AceType(StrEnum):
     """Access-control entry type."""
 
@@ -84,6 +88,33 @@ class EpaPolicy(StrEnum):
     ALLOW = "allow"  # honored if the client offers it, but not required
     REQUIRE = "require"  # enforced — the ESC8 mitigation
     UNKNOWN = "unknown"  # endpoint present but EPA state not read
+
+
+class StrongCertBinding(StrEnum):
+    """DC StrongCertificateBindingEnforcement registry value."""
+
+    DISABLED = "disabled"
+    PERMISSIVE = "permissive"
+    STRICT = "strict"
+    UNKNOWN = "unknown"
+
+
+class CertMappingMethod(StrEnum):
+    """DC CertificateMappingMethods registry value."""
+
+    SUBJECT = "subject"
+    ISSUER_SERIAL = "issuer_serial"
+    SUBJECT_ISSUER_SERIAL = "subject_issuer_serial"
+    ALT_SECURITY_IDENTITIES = "alt_security_identities"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class PrincipalMapping:
+    """A principal's altSecurityIdentities mappings (ESC14 surface)."""
+
+    dn: str
+    mappings: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -209,6 +240,15 @@ class Manifest:
 
 
 @dataclass(frozen=True)
+class DcConfiguration:
+    """A domain controller's certificate mapping configuration (ESC10 surface)."""
+
+    name: str
+    strong_certificate_binding_enforcement: StrongCertBinding
+    certificate_mapping_methods: frozenset[CertMappingMethod]
+
+
+@dataclass(frozen=True)
 class Estate:
     """The whole normalized export — the detectors' single input."""
 
@@ -218,4 +258,6 @@ class Estate:
     oids: tuple[IssuanceOid, ...]
     crls: tuple[Crl, ...]
     endpoints: tuple[EnrollmentEndpoint, ...]
+    dcs: tuple[DcConfiguration, ...]
+    principal_mappings: tuple[PrincipalMapping, ...]
     manifest: Manifest

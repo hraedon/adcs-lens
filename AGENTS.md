@@ -88,7 +88,10 @@ DACLs → ACEs, and an `acl_obtained` marker), CA role security
 (`CA\Security` → ESC7), PKI-object ACLs (NTAuth / AIA / CDP / PKS containers +
 CA objects → ESC5), IIS enrollment endpoints (Web Enrollment / CES bindings +
 Windows-auth + Extended Protection → ESC8), and issuance OIDs; validated
-end-to-end against a live enterprise CA. Remaining: ESC10, ESC14, ESC15. ESC5 is
+end-to-end against a live enterprise CA. The ESC10/ESC14 detectors are built and
+tested, but their collector passes (`esc10-dc-registry`, `esc14-altsecid`) are
+not wired yet, so they degrade to a note. Remaining: ESC10/ESC14 collector
+passes, ESC15. ESC5 is
 negative-validated on the real CA with positive validation via the synthetic
 fixture; ESC8 is **positive-validated on the real CA** (live `/certsrv`
 HTTP+NTLM+no-EPA → HIGH); ESC11/ESC13 are negative-validated on the real CA but

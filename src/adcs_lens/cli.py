@@ -15,6 +15,7 @@ from adcs_lens import __version__
 from adcs_lens.detection import run_all
 from adcs_lens.display import render_json, render_text
 from adcs_lens.ingest import IngestError, ingest
+from adcs_lens.model import SEVERITY_RANK, Severity
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -36,6 +37,17 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=90,
         help="Flag CA certs/CRLs within this many days of expiry (default: 90).",
+    )
+    p_doctor.add_argument(
+        "--severity",
+        choices=[sev.value for sev in Severity],
+        default="info",
+        help="Minimum severity to include in output (default: info = all).",
+    )
+    p_doctor.add_argument(
+        "--exit-code",
+        action="store_true",
+        help="Exit non-zero when any finding meets or exceeds --severity (for CI gating).",
     )
     return parser
 
@@ -60,9 +72,25 @@ def _cmd_ingest(export_dir: str) -> int:
     return 0
 
 
-def _cmd_doctor(export_dir: str, *, as_json: bool, warn_days: int) -> int:
-    findings = run_all(ingest(export_dir), warn_days=warn_days)
+def _cmd_doctor(
+    export_dir: str,
+    *,
+    as_json: bool,
+    warn_days: int,
+    severity: str,
+    exit_code: bool,
+) -> int:
+    min_rank = SEVERITY_RANK[Severity(severity)]
+
+    all_findings = run_all(ingest(export_dir), warn_days=warn_days)
+    # Lower rank == worse; keep findings at or above the requested floor.
+    findings = [f for f in all_findings if SEVERITY_RANK[f.severity] <= min_rank]
+
     print(render_json(findings) if as_json else render_text(findings))
+
+    # `findings` is already filtered to the threshold, so any survivor trips the gate.
+    if exit_code and findings:
+        return 1
     return 0
 
 
@@ -77,7 +105,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "ingest":
             return _cmd_ingest(args.export_dir)
         if args.command == "doctor":
-            return _cmd_doctor(args.export_dir, as_json=args.json, warn_days=args.warn_days)
+            return _cmd_doctor(
+                args.export_dir,
+                as_json=args.json,
+                warn_days=args.warn_days,
+                severity=args.severity,
+                exit_code=args.exit_code,
+            )
     except IngestError as exc:
         return _error(str(exc))
     except json.JSONDecodeError as exc:

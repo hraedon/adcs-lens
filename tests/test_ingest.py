@@ -16,9 +16,12 @@ def test_manifest_and_counts(json_export: Path) -> None:
     estate = ingest(json_export)
     assert estate.manifest.host == "LABCA01"
     assert estate.manifest.domain == "lab.example.com"
-    assert "esc10_dc_registry" in estate.manifest.skipped_passes
+    # DC registry is collected in the fixture, so its pass is not skipped. Use the
+    # hyphenated pass name the detectors actually gate on (esc10-dc-registry).
+    assert "esc10-dc-registry" not in estate.manifest.skipped_passes
     assert len(estate.cas) == 2
     assert len(estate.templates) == 1
+    assert len(estate.dcs) == 2
 
 
 def test_bom_tolerant(json_export: Path) -> None:

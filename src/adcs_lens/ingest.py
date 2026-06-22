@@ -26,9 +26,11 @@ from adcs_lens.model import (
     CertAuthority,
     CertKind,
     CertLifecycle,
+    CertMappingMethod,
     CertTemplate,
     Crl,
     CrlTier,
+    DcConfiguration,
     EndpointKind,
     EnrollmentEndpoint,
     EpaPolicy,
@@ -36,6 +38,8 @@ from adcs_lens.model import (
     IssuanceOid,
     Manifest,
     PkiObjectAcl,
+    PrincipalMapping,
+    StrongCertBinding,
 )
 from adcs_lens.normalize import normalize_sid
 
@@ -264,6 +268,35 @@ def ingest(export_dir: str | Path) -> Estate:
         for o in _require_list(base, "oid-objects.json", _load(base, "oid-objects.json"))
     )
 
+    # --- DC configuration (ESC10) ---
+    dcs = tuple(
+        DcConfiguration(
+            name=_coerce_str(d.get("name", "")),
+            strong_certificate_binding_enforcement=_kind(
+                d.get("strong_certificate_binding_enforcement", "unknown"),
+                StrongCertBinding,
+                "StrongCertificateBindingEnforcement",
+                default="unknown",
+            ),
+            certificate_mapping_methods=frozenset(
+                _kind(m, CertMappingMethod, "CertificateMappingMethod", default="unknown")
+                for m in d.get("certificate_mapping_methods", [])
+            ),
+        )
+        for d in _require_list(base, "dc-config.json", _load(base, "dc-config.json"))
+    )
+
+    # --- Principal mappings (ESC14) ---
+    principal_mappings = tuple(
+        PrincipalMapping(
+            dn=_coerce_str(p.get("dn", "")),
+            mappings=tuple(_coerce_str(m) for m in p.get("mappings", [])),
+        )
+        for p in _require_list(
+            base, "principal-mappings.json", _load(base, "principal-mappings.json")
+        )
+    )
+
     manifest = Manifest(
         collector_version=_coerce_str(raw_manifest.get("collector_version", "unknown")),
         collected_at=_coerce_str(raw_manifest.get("collected_at", "")),
@@ -280,6 +313,8 @@ def ingest(export_dir: str | Path) -> Estate:
         oids=oids,
         crls=tuple(crls),
         endpoints=endpoints,
+        dcs=dcs,
+        principal_mappings=principal_mappings,
         manifest=manifest,
     )
 

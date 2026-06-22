@@ -107,22 +107,27 @@ adcs-lens doctor C:\AdcsExport --json     # stable JSON envelope
 
 > Status: the deterministic core is built and tested (ingest → `doctor`) with
 > **ESC1**, **ESC2**, **ESC3**, **ESC4**, **ESC5**, **ESC6**, **ESC7**, **ESC8**,
-> **ESC9**, **ESC11**, **ESC13** and infrastructure cert/CRL-expiry detectors.
-> Per-template ACL-gap detection (`TEMPLATE_ACL_UNREADABLE`) is also built.
+> **ESC9**, **ESC10**, **ESC11**, **ESC13**, **ESC14** and infrastructure
+> cert/CRL-expiry detectors. Per-template ACL-gap detection
+> (`TEMPLATE_ACL_UNREADABLE`) is also built.
 > The read-only PowerShell **collector** (`scripts/Export-AdcsEstate.ps1`) is
 > built and validated end-to-end against a live enterprise CA — including the
 > PKI-object ACL pass (NTAuth / AIA / CDP / PKS containers + CA objects) that
 > backs ESC5 and the IIS enrollment-endpoint pass (Web Enrollment / CES bindings,
 > Windows-auth, Extended Protection) that backs ESC8. The synthetic fixture
 > generator (`tests/fixtures/build_fixture.py`) exercises the full pipeline
-> end-to-end. ESC10, ESC14, and ESC15 detectors are planned but not yet built
-> (see open work items).
+> end-to-end. The **ESC10 / ESC14** detectors (DC certificate-mapping) are built
+> and tested, but their collector passes (`esc10-dc-registry`,
+> `esc14-altsecid`) are not wired yet — until then they degrade to a note rather
+> than firing positively. ESC15 is still planned (see open work items).
 
 ## Status
 
-Core built (Plan 001 Phases 0, 1, 2, 3) with ESC1/2/3/4/5/6/7/8/9/11/13 detectors
-and infrastructure cert/CRL-expiry checks. The collector is validated against a
-live enterprise CA. Remaining: ESC10/ESC14 (DC cert mapping) and ESC15 (EKUwu).
+Core built (Plan 001 Phases 0, 1, 2, 3) with ESC1/2/3/4/5/6/7/8/9/10/11/13/14
+detectors and infrastructure cert/CRL-expiry checks. The collector is validated
+against a live enterprise CA. Remaining: the ESC10/ESC14 collector passes (the
+detectors exist; the DC-registry and altSecurityIdentities collection passes are
+not wired yet) and ESC15 (EKUwu).
 Foundational docs:
 - [`docs/threat-model.md`](docs/threat-model.md) — the ESC + hygiene catalogue
   with the static-detectability boundary. **Start here.**
