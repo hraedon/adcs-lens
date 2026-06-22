@@ -97,8 +97,13 @@ principal can enroll in (the requester injects application policies on an unpatc
 CA) — reuses existing collector data (schema_version + enroll ACL), no new pass.
 The full statically-detectable ESC family is now built. ESC5 is
 negative-validated on the real CA with positive validation via the synthetic
-fixture; ESC8 is **positive-validated on the real CA** (live `/certsrv`
-HTTP+NTLM+no-EPA → HIGH); ESC11/ESC13/ESC10/ESC14 are negative-validated on the
-real lab but still await positive (vulnerable-config) validation there (ESC10/ESC14
-positive is covered by the synthetic fixture; the lab DCs run secure defaults —
-StrongCertificateBindingEnforcement unset, no Schannel UPN bit, no altSecurityIdentities).
+fixture; ESC8/ESC10/ESC11/ESC14 are **positive-validated on the real lab** (ESC8
+live `/certsrv` HTTP+NTLM+no-EPA → HIGH; ESC10 via a temporary Schannel UPN bit +
+disabled binding on a DC; ESC11 via a temporarily-cleared
+IF_ENFORCEENCRYPTICERTREQUEST; ESC14 via a temporary weak altSecurityIdentities —
+all reverted with cleanup discipline). ESC13 still awaits live positive (needs an
+AMA OID-to-group-link); positive for it is covered by the synthetic fixture.
+
+The collector's OS-independent helpers (bit decoders, certutil parsers, IIS
+classifiers) are unit-tested with Pester via `-FunctionsOnly` (CI `collector-helpers`
+job on pwsh); the Windows-only collection paths stay out of scope (WI-009).

@@ -32,34 +32,32 @@
   CertificateMappingMethods via WMI). Only used when -CollectDcMapping is set; if
   absent the esc10-dc-registry pass is skipped + noted.
 #>
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Collect')]
 param(
-  [Parameter(Mandatory)] [string] $OutDir,
-  [Parameter(Mandatory)] [string] $LdapUserB64,
-  [Parameter(Mandatory)] [string] $LdapPassB64,
+  [Parameter(Mandatory, ParameterSetName = 'Collect')] [string] $OutDir,
+  [Parameter(Mandatory, ParameterSetName = 'Collect')] [string] $LdapUserB64,
+  [Parameter(Mandatory, ParameterSetName = 'Collect')] [string] $LdapPassB64,
   # ESC10/ESC14 DC certificate-mapping passes widen the export footprint, so they
   # are opt-in. When set, esc14-altsecid (LDAP altSecurityIdentities) runs; the
   # esc10-dc-registry pass additionally needs DC-admin creds for remote registry.
-  [switch] $CollectDcMapping,
-  [string] $DcRegistryUserB64,
-  [string] $DcRegistryPassB64
+  [Parameter(ParameterSetName = 'Collect')] [switch] $CollectDcMapping,
+  [Parameter(ParameterSetName = 'Collect')] [string] $DcRegistryUserB64,
+  [Parameter(ParameterSetName = 'Collect')] [string] $DcRegistryPassB64,
+  # Self-test: define the pure helper functions and return before any collection.
+  # Lets the Pester suite dot-source this script and exercise the parsers/decoders
+  # on Linux pwsh (the LDAP/WMI/certutil paths need Windows + a live estate).
+  [Parameter(Mandatory, ParameterSetName = 'SelfTest')] [switch] $FunctionsOnly
 )
 
 $ErrorActionPreference = 'Stop'
-$COLLECTOR_VERSION = '0.4.1'
+$COLLECTOR_VERSION = '0.4.2'
 
 function _b64([string]$s) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($s)) }
-$LdapUser = _b64 $LdapUserB64
-$LdapPass = _b64 $LdapPassB64
 
-New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 # Use JavaScriptSerializer, not ConvertTo-Json: PS 5.1's ConvertTo-Json collapses
 # single-element arrays to scalars (top-level AND nested), which would corrupt the
 # list fields adcs_lens.ingest requires. JavaScriptSerializer honours the real
 # .NET type, so a 1-element array stays a JSON array.
-Add-Type -AssemblyName System.Web.Extensions
-$script:JS = New-Object System.Web.Script.Serialization.JavaScriptSerializer
-$script:JS.MaxJsonLength = [int]::MaxValue
 function _writeJson($obj, [string]$name) {
   $p = Join-Path $OutDir $name
   $dir = Split-Path $p -Parent
@@ -108,6 +106,48 @@ function _decode([int]$value, $map) {
   # selects BY POSITION, not by key, which silently mis-decodes / yields $null.
   foreach ($e in $map.GetEnumerator()) { if ($value -band $e.Key) { $out += $e.Value } }
   ,$out
+}
+
+# Schannel CertificateMappingMethods bits (TLS registry-settings doc). The UPN bit
+# (0x4) is ESC10 case 1. Kept here (not in the DC-mapping block) so the self-test
+# can exercise the decode.
+$SCHANNEL_BITS = [ordered]@{ 1 = 'subject_issuer'; 2 = 'issuer'; 4 = 'upn'; 8 = 's4u2self'; 16 = 's4u2self_explicit' }
+
+# KDC StrongCertificateBindingEnforcement (0/1/2 -> disabled/permissive/strict).
+function _decodeBinding([int]$v) {
+  switch ($v) { 0 { 'disabled' } 1 { 'permissive' } 2 { 'strict' } default { 'unknown' } }
+}
+
+# Pure parsers for certutil -getreg output (split from the certutil invocation so
+# the line-matching can be unit-tested without certutil/Windows).
+function _parseCertutilFlagLines($lines) {
+  $out = @()
+  foreach ($line in $lines) { if ($line -match '^\s+([A-Z][A-Z0-9_]+)\s+--\s') { $out += $Matches[1] } }
+  ,$out
+}
+function _parseCertutilDwordLines($lines) {
+  foreach ($line in $lines) {
+    if ($line -match '=\s*([0-9a-fA-Fx]+)\s*\(') { return [Convert]::ToInt64($Matches[1].Replace('0x', ''), 16) }
+  }
+  return $null
+}
+
+# IIS enrollment-endpoint classifiers (ESC8). Top-level so the self-test reaches
+# them; the live IIS pass below calls these.
+function _epaToken($v) {
+  switch ([string]$v) {
+    '2' { 'require' } 'Require' { 'require' }
+    '1' { 'allow' }   'Allow'   { 'allow' }
+    '0' { 'none' }    'Off' { 'none' } 'None' { 'none' } '' { 'none' }
+    default { 'unknown' }
+  }
+}
+function _classifyApp([string]$p) {
+  $l = $p.ToLower()
+  if ($l -match 'mscep') { return 'ndes' }            # NDES/SCEP
+  if ($l -match 'certsrv') { return 'web_enrollment' } # /certsrv
+  if ($l -match '_ces_' -or $l -match 'cep') { return 'ces' }
+  return $null
 }
 
 # --- nTSecurityDescriptor -> ACEs (ESC1/ESC4/ESC5/ESC7 inputs) --------------
@@ -215,19 +255,21 @@ function _caSecurityAces([string]$caName) {
 
 # --- CA registry via certutil (local, no network cred needed) ---------------
 # Parse certutil's own decoded "FLAG_NAME -- value" lines for EditFlags/InterfaceFlags.
-function _certutilFlags([string]$regpath) {
-  $out = @()
-  foreach ($line in (& certutil -getreg $regpath 2>$null)) {
-    if ($line -match '^\s+([A-Z][A-Z0-9_]+)\s+--\s') { $out += $Matches[1] }
-  }
-  ,$out
-}
-function _certutilDword([string]$regpath) {
-  foreach ($line in (& certutil -getreg $regpath 2>$null)) {
-    if ($line -match '=\s*([0-9a-fA-Fx]+)\s*\(') { return [Convert]::ToInt64($Matches[1].Replace('0x',''),16) }
-  }
-  return $null
-}
+function _certutilFlags([string]$regpath) { _parseCertutilFlagLines (& certutil -getreg $regpath 2>$null) }
+function _certutilDword([string]$regpath) { _parseCertutilDwordLines (& certutil -getreg $regpath 2>$null) }
+
+# --- self-test boundary -----------------------------------------------------
+# Everything above is a pure function/data definition. The Pester suite dot-sources
+# this script with -FunctionsOnly and stops here; nothing below runs in that mode.
+if ($PSCmdlet.ParameterSetName -eq 'SelfTest') { return }
+
+$LdapUser = _b64 $LdapUserB64
+$LdapPass = _b64 $LdapPassB64
+New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+Add-Type -AssemblyName System.Web.Extensions
+$script:JS = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+$script:JS.MaxJsonLength = [int]::MaxValue
+
 $caCommonName = ((& certutil -getreg CA\CommonName 2>$null) | Where-Object { $_ -match 'CommonName REG_SZ = (.+)' } | ForEach-Object { $Matches[1].Trim() } | Select-Object -First 1)
 $editFlags      = _certutilFlags 'policy\EditFlags'
 $interfaceFlags = _certutilFlags 'CA\InterfaceFlags'
@@ -327,21 +369,6 @@ $webEndpoints = @()
 $endpointsSkipped = $true
 try { Import-Module WebAdministration -ErrorAction Stop; $endpointsSkipped = $false } catch { }
 if (-not $endpointsSkipped) {
-  function _epaToken($v) {
-    switch ([string]$v) {
-      '2' { 'require' } 'Require' { 'require' }
-      '1' { 'allow' }   'Allow'   { 'allow' }
-      '0' { 'none' }    'Off' { 'none' } 'None' { 'none' } '' { 'none' }
-      default { 'unknown' }
-    }
-  }
-  function _classifyApp([string]$p) {
-    $l = $p.ToLower()
-    if ($l -match 'mscep') { return 'ndes' }            # NDES/SCEP
-    if ($l -match 'certsrv') { return 'web_enrollment' } # /certsrv
-    if ($l -match '_ces_' -or $l -match 'cep') { return 'ces' }
-    return $null
-  }
   foreach ($site in (Get-Website)) {
     $protos = @(); foreach ($b in $site.bindings.Collection) { if ($protos -notcontains [string]$b.protocol) { $protos += [string]$b.protocol } }
     foreach ($app in (Get-WebApplication -Site $site.Name)) {
@@ -400,7 +427,6 @@ if ($CollectDcMapping) {
   # esc10-dc-registry: per-DC KDC + Schannel registry (needs DC-admin creds).
   if ($DcRegistryUserB64 -and $DcRegistryPassB64) {
     $HKLM = [uint32]2147483650
-    $SCHANNEL_BITS = [ordered]@{ 1 = 'subject_issuer'; 2 = 'issuer'; 4 = 'upn'; 8 = 's4u2self'; 16 = 's4u2self_explicit' }
     $dcCred = New-Object Management.Automation.PSCredential(
       (_b64 $DcRegistryUserB64),
       (ConvertTo-SecureString (_b64 $DcRegistryPassB64) -AsPlainText -Force))
@@ -422,7 +448,7 @@ if ($CollectDcMapping) {
         }
         $kdc = $reg.GetDWORDValue($HKLM, 'SYSTEM\CurrentControlSet\Services\Kdc', 'StrongCertificateBindingEnforcement')
         if ($kdc.ReturnValue -eq 0 -and $null -ne $kdc.uValue) {
-          $binding = switch ([int]$kdc.uValue) { 0 { 'disabled' } 1 { 'permissive' } 2 { 'strict' } default { 'unknown' } }
+          $binding = _decodeBinding ([int]$kdc.uValue)
         }
         $sch = $reg.GetDWORDValue($HKLM, 'SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL', 'CertificateMappingMethods')
         if ($sch.ReturnValue -eq 0 -and $null -ne $sch.uValue) {

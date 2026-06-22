@@ -52,3 +52,25 @@ jobs:
 
       - name: Run tests
         run: .venv/bin/pytest -q
+
+  collector-helpers:
+    # The collector's OS-independent helpers (bit decoders, certutil parsers, IIS
+    # classifiers) are unit-tested on pwsh via -FunctionsOnly. The Windows-only
+    # collection paths (LDAP/WMI/certutil) are out of scope (WI-009).
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Install Pester
+        shell: pwsh
+        run: Install-Module Pester -Scope CurrentUser -Force -SkipPublisherCheck -MinimumVersion 5.0
+
+      - name: Run collector helper tests
+        shell: pwsh
+        run: |
+          $r = Invoke-Pester -Path tests/collector -Output Detailed -PassThru
+          if ($r.FailedCount -gt 0) { exit 1 }
