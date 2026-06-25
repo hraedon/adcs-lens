@@ -32,7 +32,7 @@ from adcs_lens.model import (
     StrongCertBinding,
     X509MappingForm,
 )
-from adcs_lens.normalize import is_low_priv_trustee
+from adcs_lens.normalize import is_low_priv_trustee, normalize_sid
 
 # ESC6: requester-supplied SAN honored CA-wide regardless of template.
 _EDITF_SAN2 = "EDITF_ATTRIBUTESUBJECTALTNAME2"
@@ -59,10 +59,52 @@ _AUTH_EKUS = frozenset({_CLIENT_AUTH, _SMARTCARD_LOGON, _PKINIT_CLIENT_AUTH, _AN
 # Certificate Request Agent EKU (ESC3): the holder can enroll on behalf of others.
 _ENROLLMENT_AGENT_EKU = "1.3.6.1.4.1.311.20.2.1"
 
-# ACE rights (lower-cased) that grant or imply the ability to enroll.
-_ENROLL_RIGHTS = frozenset(
-    {"enroll", "autoenroll", "allextendedrights", "genericall", "fullcontrol"}
+# The single enrollment-capability right. ``AutoEnroll`` is intentionally
+# excluded: AD CS issuance is gated on the Enroll extended right, so a principal
+# with only AutoEnroll cannot obtain a certificate at all (the old behavior of
+# flagging AutoEnroll-alone as ESC1 was a latent false positive). Broad rights
+# (GenericAll/FullControl/AllExtendedRights) still satisfy this via ``_COVERS``.
+# Narrowing is also required for sound Deny logic: keeping ``autoenroll`` here
+# would make ``Allow AutoEnroll + Deny Enroll`` fire (AutoEnroll survives a Deny
+# that does not cover it) — a false positive, since the principal lacks Enroll.
+_ENROLL_RIGHTS = frozenset({"enroll"})
+
+# Every right token the detectors treat as a capability (lower-cased). Used so
+# that a GenericAll/FullControl Deny can be represented as "blocks everything"
+# without a sentinel. Not exhaustive over collector tokens — only over rights a
+# detector keys a capability on.
+_ALL_RIGHTS: frozenset[str] = frozenset(
+    {
+        "enroll", "autoenroll", "allextendedrights",
+        "genericall", "fullcontrol", "genericread",
+        "genericwrite", "writedacl", "writeowner",
+        "writepropertyall", "writeproperty", "readproperty",
+        "manageca", "managecertificates",
+    }
 )
+
+# A denied right D blocks every right in _COVERS[D]. Implications follow
+# Windows access-mask semantics:
+#   - GenericAll / FullControl cover every right.
+#   - AllExtendedRights covers the extended rights Enroll + AutoEnroll only.
+#   - GenericWrite covers write-all-properties (WritePropertyAll) but NOT
+#     WriteDacl / WriteOwner (those are control rights, not property writes).
+# IMPORTANT: AutoEnroll does NOT cover Enroll (distinct extended rights), and
+# Enroll does NOT cover AutoEnroll. Getting this backwards causes false negatives.
+_COVERS: dict[str, frozenset[str]] = {
+    "genericall": _ALL_RIGHTS,
+    "fullcontrol": _ALL_RIGHTS,
+    "allextendedrights": frozenset({"enroll", "autoenroll"}),
+    "enroll": frozenset({"enroll"}),
+    "autoenroll": frozenset({"autoenroll"}),
+    "genericwrite": frozenset({"genericwrite", "writepropertyall"}),
+    "writedacl": frozenset({"writedacl"}),
+    "writeowner": frozenset({"writeowner"}),
+    "writepropertyall": frozenset({"writepropertyall"}),
+    "writeproperty": frozenset({"writeproperty"}),
+    "manageca": frozenset({"manageca"}),
+    "managecertificates": frozenset({"managecertificates"}),
+}
 
 # ACE rights (lower-cased) that let a principal rewrite a template object, and so
 # turn it into ESC1 (enable enrollee-supplied subject + a client-auth EKU). These
@@ -219,18 +261,49 @@ def _can_authenticate(template: CertTemplate) -> bool:
     return any(eku in _AUTH_EKUS for eku in template.ekus)
 
 
+def _blocked_rights(security: tuple[AceEntry, ...], trustee_sid: str) -> frozenset[str]:
+    """Rights blocked for *trustee_sid* by explicit Deny ACEs, expanded by implication.
+
+    A Deny of a right blocks that right and every right it covers (per
+    ``_COVERS``). Only same-trustee Deny ACEs are considered — group-token
+    expansion (a Deny on a group the requester belongs to) is out of scope: the
+    collector exposes only the ACE trustee SID, not the requester's full group
+    token, so we match on the ACE's own trustee SID.
+    """
+    sid = normalize_sid(trustee_sid)
+    blocked: set[str] = set()
+    for ace in security:
+        if ace.ace_type is not AceType.DENY:
+            continue
+        if normalize_sid(ace.trustee_sid) != sid:
+            continue
+        for r in ace.rights:
+            blocked |= _COVERS.get(r.strip().lower(), frozenset())
+    return frozenset(blocked)
+
+
 def _low_priv_allow_aces_in(
     security: tuple[AceEntry, ...], rights: frozenset[str]
 ) -> list[AceEntry]:
-    """Allow-ACEs in *security* granting any of *rights* (lower-cased) to low-priv."""
+    """Allow-ACEs in *security* granting any of *rights* (lower-cased) to low-priv,
+    after Deny precedence: a right that is blocked by an explicit Deny on the same
+    trustee does not count. Broad rights (e.g. GenericAll) satisfy only if they cover
+    at least one requested right that is not blocked. An ACE is kept only if at least
+    one of its granting rights survives, so a trustee fully blocked by Deny yields no
+    ACE here (the capability is suppressed)."""
     out: list[AceEntry] = []
     for ace in security:
         if ace.ace_type is not AceType.ALLOW:
             continue
         if not is_low_priv_trustee(ace.trustee_sid):
             continue
-        if any(r.strip().lower() in rights for r in ace.rights):
-            out.append(ace)
+        blocked = _blocked_rights(security, ace.trustee_sid)
+        for r in ace.rights:
+            token = r.strip().lower()
+            covers = _COVERS.get(token, frozenset({token}))
+            if (covers & rights) - blocked:
+                out.append(ace)
+                break
     return out
 
 
@@ -433,6 +506,7 @@ def detect_esc4(estate: Estate) -> list[Finding]:
         if not controllers:
             continue
         who = ", ".join(sorted({a.trustee_name or a.trustee_sid for a in controllers}))
+        template_security = tmpl.security
         rights = ", ".join(
             sorted(
                 {
@@ -440,6 +514,7 @@ def detect_esc4(estate: Estate) -> list[Finding]:
                     for a in controllers
                     for r in a.rights
                     if r.strip().lower() in _DANGEROUS_TEMPLATE_CONTROL
+                    and r.strip().lower() not in _blocked_rights(template_security, a.trustee_sid)
                 }
             )
         )
@@ -508,6 +583,7 @@ def detect_esc5(estate: Estate) -> list[Finding]:
                     for a in controllers
                     for r in a.rights
                     if r.strip().lower() in _DANGEROUS_OBJECT_CONTROL
+                    and r.strip().lower() not in _blocked_rights(obj.security, a.trustee_sid)
                 }
             )
         )
@@ -560,10 +636,11 @@ def detect_esc7(estate: Estate) -> list[Finding]:
                 continue
             if not is_low_priv_trustee(ace.trustee_sid):
                 continue
-            manage = {r.strip().lower() for r in ace.rights} & {
+            blocked = _blocked_rights(ca.security, ace.trustee_sid)
+            manage = ({r.strip().lower() for r in ace.rights} & {
                 _CA_MANAGE_CA,
                 _CA_MANAGE_CERTS,
-            }
+            }) - blocked
             if not manage:
                 continue
             _, rights = by_trustee.setdefault(ace.trustee_sid, (ace.trustee_name, set()))

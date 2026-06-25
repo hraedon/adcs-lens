@@ -120,6 +120,11 @@ def _ctrl_ace(
     return AceEntry(trustee_sid=sid, trustee_name="trustee", rights=(right,), ace_type=ace_type)
 
 
+def _deny_enroll(sid: str = LOW_PRIV_SID) -> AceEntry:
+    """A Deny-Enroll ACE on a low-priv trustee (for Deny-precedence tests)."""
+    return _ctrl_ace(sid=sid, right="Enroll", ace_type=AceType.DENY)
+
+
 def _pki_acl(
     kind: AclKind,
     *,
@@ -1491,3 +1496,159 @@ def test_run_all_puts_info_degradation_last() -> None:
     findings = run_all(estate, now=NOW)
     assert findings[-1].severity == Severity.INFO
     assert findings[0].severity == Severity.CRITICAL
+
+
+# --- Deny-ACE precedence --------------------------------------------------
+
+
+def test_esc1_suppressed_when_same_right_denied() -> None:
+    allow = _enroll_ace(right="Enroll")
+    deny = _ctrl_ace(right="Enroll", ace_type=AceType.DENY)
+    assert detect_esc1(_estate(templates=(_template("T", security=(allow, deny)),))) == []
+
+
+def test_esc1_suppressed_by_broad_deny() -> None:
+    allow = _enroll_ace(right="Enroll")
+    deny = _ctrl_ace(right="GenericAll", ace_type=AceType.DENY)
+    assert detect_esc1(_estate(templates=(_template("T", security=(allow, deny)),))) == []
+
+
+def test_esc1_not_suppressed_when_unrelated_right_denied() -> None:
+    allow = _enroll_ace(right="Enroll")
+    deny = _ctrl_ace(right="WriteDacl", ace_type=AceType.DENY)
+    findings = detect_esc1(_estate(templates=(_template("T", security=(allow, deny)),)))
+    assert len(findings) == 1
+    assert findings[0].check == "ESC1"
+
+
+def test_esc1_not_suppressed_when_autoenroll_denied() -> None:
+    # AutoEnroll is a distinct extended right; denying it must not block Enroll.
+    allow = _enroll_ace(right="Enroll")
+    deny = _ctrl_ace(right="AutoEnroll", ace_type=AceType.DENY)
+    findings = detect_esc1(_estate(templates=(_template("T", security=(allow, deny)),)))
+    assert len(findings) == 1
+    assert findings[0].check == "ESC1"
+
+
+def test_esc1_specific_deny_beats_broad_allow() -> None:
+    allow = _enroll_ace(right="GenericAll")
+    deny = _ctrl_ace(right="Enroll", ace_type=AceType.DENY)
+    assert detect_esc1(_estate(templates=(_template("T", security=(allow, deny)),))) == []
+
+
+def test_esc1_broad_allow_survives_unrelated_deny() -> None:
+    allow = _enroll_ace(right="GenericAll")
+    deny = _ctrl_ace(right="WriteDacl", ace_type=AceType.DENY)
+    findings = detect_esc1(_estate(templates=(_template("T", security=(allow, deny)),)))
+    assert len(findings) == 1
+    assert findings[0].check == "ESC1"
+
+
+def test_esc4_suppressed_when_control_right_denied() -> None:
+    allow = _enroll_ace(right="WriteDacl")
+    deny = _ctrl_ace(right="WriteDacl", ace_type=AceType.DENY)
+    assert detect_esc4(_estate(templates=(_template("T", security=(allow, deny)),))) == []
+
+
+def test_esc4_not_suppressed_when_only_one_control_right_denied() -> None:
+    allow = _enroll_ace(right="GenericAll")
+    deny = _ctrl_ace(right="WriteDacl", ace_type=AceType.DENY)
+    findings = detect_esc4(_estate(templates=(_template("T", security=(allow, deny)),)))
+    assert len(findings) == 1
+    assert findings[0].check == "ESC4"
+    assert "WriteDacl" not in findings[0].detail
+    assert "GenericAll" in findings[0].detail
+
+
+def test_esc7_suppressed_when_manageca_denied() -> None:
+    allow = _enroll_ace(right="ManageCA")
+    deny = _ctrl_ace(right="ManageCA", ace_type=AceType.DENY)
+    assert detect_esc7(_estate(cas=(_ca("CA", security=(allow, deny)),))) == []
+
+
+def test_esc7_suppressed_by_broad_deny() -> None:
+    allow = _enroll_ace(right="ManageCA")
+    deny = _ctrl_ace(right="GenericAll", ace_type=AceType.DENY)
+    assert detect_esc7(_estate(cas=(_ca("CA", security=(allow, deny)),))) == []
+
+
+def test_esc7_not_suppressed_when_managecertificates_denied() -> None:
+    allow = _enroll_ace(right="ManageCA")
+    deny = _ctrl_ace(right="ManageCertificates", ace_type=AceType.DENY)
+    findings = detect_esc7(_estate(cas=(_ca("CA", security=(allow, deny)),)))
+    assert len(findings) == 1
+    assert findings[0].check == "ESC7"
+    assert findings[0].severity == Severity.CRITICAL
+
+
+def test_esc5_suppressed_when_control_right_denied() -> None:
+    allow = _ctrl_ace(right="WriteDacl")
+    deny = _ctrl_ace(right="WriteDacl", ace_type=AceType.DENY)
+    assert (
+        detect_esc5(
+            _estate(acls=(_pki_acl(AclKind.NTAUTH, security=(allow, deny)),))
+        )
+        == []
+    )
+
+
+# Broad enroll rights must still fire when unblocked (guards the coverage
+# expansion that the _ENROLL_RIGHTS narrowing introduced).
+def test_esc1_all_extended_rights_still_fires() -> None:
+    tmpl = _template("AER", security=(_enroll_ace(right="AllExtendedRights"),))
+    assert len(detect_esc1(_estate(templates=(tmpl,)))) == 1
+
+
+def test_esc1_full_control_still_fires() -> None:
+    tmpl = _template("FC", security=(_enroll_ace(right="FullControl"),))
+    assert len(detect_esc1(_estate(templates=(tmpl,)))) == 1
+
+
+# Each enroll-dependent detector is wired through the shared Deny-aware path —
+# one test each so a future refactor that inlines the check can't silently drop
+# Deny precedence without a test catching it.
+def test_esc2_suppressed_when_enroll_denied() -> None:
+    tmpl = _template("Any", ekus=(ANY_PURPOSE,), security=(_enroll_ace(), _deny_enroll()))
+    assert detect_esc2(_estate(templates=(tmpl,))) == []
+
+
+def test_esc3_suppressed_when_enroll_denied() -> None:
+    tmpl = _template("Agent", ekus=(ENROLLMENT_AGENT,), security=(_enroll_ace(), _deny_enroll()))
+    assert detect_esc3(_estate(templates=(tmpl,))) == []
+
+
+def test_esc13_suppressed_when_enroll_denied() -> None:
+    tmpl = _template(
+        "Linked",
+        ekus=(CLIENT_AUTH,),
+        issuance_policy_oids=(POLICY_OID,),
+        security=(_enroll_ace(), _deny_enroll()),
+    )
+    estate = _estate(
+        templates=(tmpl,), oids=(IssuanceOid(POLICY_OID, "L", DOMAIN_ADMINS_SID),)
+    )
+    assert detect_esc13(estate) == []
+
+
+def test_esc15_suppressed_when_enroll_denied() -> None:
+    from adcs_lens.detection import detect_esc15
+
+    tmpl = _template("V1", schema_version=1, security=(_enroll_ace(), _deny_enroll()))
+    assert detect_esc15(_estate(templates=(tmpl,))) == []
+
+
+# A single multi-right Allow ACE with one right denied: the finding still fires
+# (WriteOwner survives) but only the surviving right is rendered.
+def test_esc4_rendering_hides_only_blocked_right() -> None:
+    allow = AceEntry(
+        trustee_sid=LOW_PRIV_SID,
+        trustee_name="trustee",
+        rights=("WriteDacl", "WriteOwner"),
+        ace_type=AceType.ALLOW,
+    )
+    deny = _ctrl_ace(right="WriteDacl", ace_type=AceType.DENY)
+    tmpl = _template("Multi", security=(allow, deny))
+    findings = detect_esc4(_estate(templates=(tmpl,)))
+    assert len(findings) == 1
+    assert "WriteOwner" in findings[0].detail
+    assert "WriteDacl" not in findings[0].detail

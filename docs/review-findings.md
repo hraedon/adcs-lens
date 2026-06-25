@@ -23,9 +23,19 @@ Deliberate for now — an unpublished-but-vulnerable template is a latent risk
 probe" stance favors surfacing it. Consider *noting* publication status in the
 finding detail to improve signal, rather than suppressing.
 
-## [LOW] Deny-ACE precedence not evaluated
+## [RESOLVED] Deny-ACE precedence now evaluated
 
-`_low_priv_allow_aces` counts an Allow/Enroll even if the same trustee has a
-matching Deny/Enroll (Windows evaluates Deny first, so they cannot enroll). Rare
-in practice; a theoretical false positive. Would need per-(trustee, right) Deny
-cross-referencing.
+Detectors now apply explicit-Deny precedence per (trustee, right) with a
+right-implication map (GenericAll/FullControl cover all; AllExtendedRights covers
+Enroll+AutoEnroll; GenericWrite covers WritePropertyAll; specific rights cover
+themselves). A capability is suppressed only when every granting right for the
+trustee is blocked, so the change cannot introduce false negatives. Residual
+limitation: only same-trustee Deny ACEs are considered (no group-token expansion);
+inherited Deny ordering is not modeled (collector reads the resolved DACL).
+
+This also corrected a latent false positive: `_ENROLL_RIGHTS` is now the single
+`Enroll` right (broad rights still satisfy it via the implication map).
+`AutoEnroll` is intentionally excluded — AD CS issuance is gated on the Enroll
+extended right, so a principal with only AutoEnroll cannot obtain a certificate,
+and including it would make `Allow AutoEnroll + Deny Enroll` fire (a false
+positive, since the principal lacks Enroll).
