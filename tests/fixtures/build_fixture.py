@@ -147,6 +147,25 @@ def build_export(
                     }
                 ],
             },
+            {
+                # Unreadable-DACL template: the collector ran the template-security
+                # pass but this template's nTSecurityDescriptor came back empty
+                # (LDAP denial), so acl_obtained is False. It is configured
+                # ESC1-positive (enrollee-supplied subject + a client-auth EKU) to
+                # prove the detectors SKIP it rather than falsely clear it — the
+                # TEMPLATE_ACL_UNREADABLE gap detector surfaces the gap instead.
+                "name": "LabKrbClientUnreadable",
+                "display_name": "Lab Krb Client (unreadable)",
+                "schema_version": 2,
+                "oid": "1.3.6.1.4.1.311.21.8.1.2.3.4.101",
+                "ekus": ["1.3.6.1.5.5.7.3.2"],  # Client Auth -> would be ESC1 if readable
+                "name_flags": ["ENROLLEE_SUPPLIES_SUBJECT"],
+                "enrollment_flags": [],
+                "min_key_size": 2048,
+                "issuance_policy_oids": [],
+                "security": [],  # SD not obtained
+                "acl_obtained": False,
+            },
         ],
     )
 

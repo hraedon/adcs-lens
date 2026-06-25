@@ -20,7 +20,7 @@ def test_manifest_and_counts(json_export: Path) -> None:
     # hyphenated pass name the detectors actually gate on (esc10-dc-registry).
     assert "esc10-dc-registry" not in estate.manifest.skipped_passes
     assert len(estate.cas) == 2
-    assert len(estate.templates) == 2
+    assert len(estate.templates) == 3
     assert len(estate.dcs) == 2
 
 
@@ -150,9 +150,11 @@ def test_severity_enum_round_trips(json_export: Path) -> None:
     findings = run_all(ingest(json_export))
     esc6 = next(f for f in findings if f.check == "ESC6")
     assert esc6.severity == Severity.CRITICAL
-    # The fixture does not emit acl_obtained; it must default to True so no
-    # spurious per-template ACL-gap note appears on backward-compat data.
-    assert all(f.check != "TEMPLATE_ACL_UNREADABLE" for f in findings)
+    # The two readable templates omit acl_obtained (default True) -> no false gap
+    # for them; the one explicit unreadable template surfaces a real gap note.
+    gaps = [f for f in findings if f.check == "TEMPLATE_ACL_UNREADABLE"]
+    assert len(gaps) == 1
+    assert gaps[0].subject == "Lab Krb Client (unreadable)"
 
 
 def test_esc8_detected_end_to_end(json_export: Path) -> None:
@@ -182,3 +184,31 @@ def test_esc5_detected_end_to_end(json_export: Path) -> None:
     assert "Public Key Services" in esc5[0].subject
     # The pass ran, so there must be no degrade note.
     assert all(f.check != "PKI_ACL_NOT_EVALUATED" for f in run_all(estate))
+
+
+def test_template_acl_unreadable_end_to_end(json_export: Path) -> None:
+    # Full ingest -> run_all pipeline for the TEMPLATE_ACL_UNREADABLE path that
+    # previously was only exercised via hand-built model objects. An unreadable-
+    # DACL template that is ESC1-positive-by-config is SKIPPED by ESC1 (its enroll
+    # ACL was not obtained, so it cannot be evaluated) and surfaced by the gap
+    # detector instead of being silently passed as "clean".
+    from adcs_lens.detection import run_all
+    estate = ingest(json_export)
+    unreadable = next(t for t in estate.templates if not t.acl_obtained)
+    assert unreadable.name == "LabKrbClientUnreadable"
+    # It is ESC1-positive by config, so the only thing holding ESC1 back is the
+    # unreadable ACL — ESC1 must skip it, not falsely clear it.
+    assert "ENROLLEE_SUPPLIES_SUBJECT" in unreadable.name_flags
+    assert "1.3.6.1.5.5.7.3.2" in unreadable.ekus  # Client Authentication
+    assert unreadable.security == ()
+
+    findings = run_all(estate)
+    gap = next(f for f in findings if f.check == "TEMPLATE_ACL_UNREADABLE")
+    assert gap.subject == "Lab Krb Client (unreadable)"
+    assert gap.severity == Severity.INFO
+    # No ESC1 finding for the unreadable template (and no estate-level degrade
+    # note — the template-security pass did run).
+    assert not any(
+        f.check == "ESC1" and f.subject == unreadable.display_name for f in findings
+    )
+    assert all(f.check != "TEMPLATE_ACL_NOT_EVALUATED" for f in findings)
