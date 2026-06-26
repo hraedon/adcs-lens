@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from adcs_lens.detection import (
+    _AUDIT_CATEGORIES,
+    detect_audit_config,
     detect_esc1,
     detect_esc2,
     detect_esc3,
@@ -18,6 +20,8 @@ from adcs_lens.detection import (
     detect_esc13,
     detect_infra_cert_expiry,
     detect_template_acl_gaps,
+    detect_weak_key_size,
+    detect_weak_signing,
     run_all,
 )
 from adcs_lens.model import (
@@ -73,6 +77,7 @@ def _template(
     security: tuple[AceEntry, ...] = (),
     acl_obtained: bool = True,
     schema_version: int = 2,
+    min_key_size: int = 2048,
 ) -> CertTemplate:
     return CertTemplate(
         name=name,
@@ -82,7 +87,7 @@ def _template(
         ekus=ekus,
         name_flags=frozenset(name_flags),
         enrollment_flags=frozenset(enrollment_flags),
-        min_key_size=2048,
+        min_key_size=min_key_size,
         issuance_policy_oids=issuance_policy_oids,
         security=security,
         published_by=(),
@@ -96,6 +101,7 @@ def _ca(
     kind: CaKind = CaKind.ISSUING,
     edit_flags: tuple[str, ...] = (),
     interface_flags: tuple[str, ...] = (),
+    audit_filter: int | None = None,
     certs: tuple[CertLifecycle, ...] = (),
     security: tuple[AceEntry, ...] = (),
 ) -> CertAuthority:
@@ -106,11 +112,32 @@ def _ca(
         kind=kind,
         edit_flags=frozenset(edit_flags),
         interface_flags=frozenset(interface_flags),
-        audit_filter=None,
+        audit_filter=audit_filter,
         validity="",
         roles=frozenset(),
         security=security,
         certs=certs,
+    )
+
+
+def _cert(
+    subject: str = "CN=CA",
+    *,
+    kind: CertKind = CertKind.ISSUING_CA,
+    not_before: datetime = NOW,
+    not_after: datetime = NOW + timedelta(days=365),
+    sig_alg: str = "sha256",
+    key_bits: int | None = 2048,
+    key_alg: str = "rsa",
+) -> CertLifecycle:
+    return CertLifecycle(
+        subject=subject,
+        kind=kind,
+        not_before=not_before,
+        not_after=not_after,
+        sig_alg=sig_alg,
+        key_bits=key_bits,
+        key_alg=key_alg,
     )
 
 
@@ -873,6 +900,7 @@ def test_lifecycle_rejects_naive_now() -> None:
                         NOW + timedelta(days=30),
                         "sha256",
                         2048,
+                        "rsa",
                     ),
                 ),
             ),
@@ -897,6 +925,7 @@ def test_expired_ca_cert_critical() -> None:
         NOW - timedelta(days=1),
         "sha256",
         2048,
+        "rsa",
     )
     findings = detect_infra_cert_expiry(_estate(cas=(_ca("CA", certs=(cert,)),)), now=NOW)
     assert findings[0].check == "CA_CERT_EXPIRY"
@@ -905,7 +934,7 @@ def test_expired_ca_cert_critical() -> None:
 
 def test_issuing_cert_near_expiry_high() -> None:
     cert = CertLifecycle(
-        "CN=Soon", CertKind.ISSUING_CA, NOW, NOW + timedelta(days=30), "sha256", 2048
+        "CN=Soon", CertKind.ISSUING_CA, NOW, NOW + timedelta(days=30), "sha256", 2048, "rsa"
     )
     findings = detect_infra_cert_expiry(
         _estate(cas=(_ca("CA", certs=(cert,)),)), now=NOW, warn_days=90
@@ -915,7 +944,7 @@ def test_issuing_cert_near_expiry_high() -> None:
 
 def test_root_cert_near_expiry_escalated_to_critical() -> None:
     cert = CertLifecycle(
-        "CN=Root", CertKind.ROOT_CA, NOW, NOW + timedelta(days=30), "sha256", 4096
+        "CN=Root", CertKind.ROOT_CA, NOW, NOW + timedelta(days=30), "sha256", 4096, "rsa"
     )
     findings = detect_infra_cert_expiry(
         _estate(cas=(_ca("Root", kind=CaKind.ROOT, certs=(cert,)),)), now=NOW
@@ -926,7 +955,7 @@ def test_root_cert_near_expiry_escalated_to_critical() -> None:
 
 def test_healthy_cert_no_finding() -> None:
     cert = CertLifecycle(
-        "CN=Fine", CertKind.ISSUING_CA, NOW, NOW + timedelta(days=1000), "sha256", 2048
+        "CN=Fine", CertKind.ISSUING_CA, NOW, NOW + timedelta(days=1000), "sha256", 2048, "rsa"
     )
     assert detect_infra_cert_expiry(_estate(cas=(_ca("CA", certs=(cert,)),)), now=NOW) == []
 
@@ -1228,7 +1257,7 @@ def test_run_all_includes_esc15() -> None:
 
 def test_run_all_sorted_worst_first() -> None:
     cert = CertLifecycle(
-        "CN=Soon", CertKind.ISSUING_CA, NOW, NOW + timedelta(days=30), "sha256", 2048
+        "CN=Soon", CertKind.ISSUING_CA, NOW, NOW + timedelta(days=30), "sha256", 2048, "rsa"
     )
     estate = _estate(
         cas=(_ca("BadCA", edit_flags=("EDITF_ATTRIBUTESUBJECTALTNAME2",), certs=(cert,)),),
@@ -1486,7 +1515,7 @@ def test_run_all_puts_info_degradation_last() -> None:
     # Real-output smoke: an INFO degradation note must sort after every actionable
     # finding, not between HIGH and (future) MEDIUM.
     cert = CertLifecycle(
-        "CN=Soon", CertKind.ISSUING_CA, NOW, NOW + timedelta(days=30), "sha256", 2048
+        "CN=Soon", CertKind.ISSUING_CA, NOW, NOW + timedelta(days=30), "sha256", 2048, "rsa"
     )
     estate = _estate(
         templates=(_template("Vuln", security=(_enroll_ace(),)),),  # ESC1 CRITICAL
@@ -1579,6 +1608,237 @@ def test_esc7_not_suppressed_when_managecertificates_denied() -> None:
     assert len(findings) == 1
     assert findings[0].check == "ESC7"
     assert findings[0].severity == Severity.CRITICAL
+
+
+# --- hygiene: weak signing algorithm ---------------------------------------
+
+
+def test_weak_signing_sha1_is_high() -> None:
+    estate = _estate(cas=(_ca("OldCA", certs=(_cert("CN=Old", sig_alg="sha1"),)),))
+    findings = detect_weak_signing(estate)
+    assert len(findings) == 1
+    assert findings[0].check == "WEAK_SIG_ALG"
+    assert findings[0].severity == Severity.HIGH
+    assert "sha1" in findings[0].detail.lower()
+
+
+def test_weak_signing_md5_is_critical() -> None:
+    estate = _estate(cas=(_ca("AncientCA", certs=(_cert("CN=Ancient", sig_alg="md5"),)),))
+    findings = detect_weak_signing(estate)
+    assert len(findings) == 1
+    assert findings[0].check == "WEAK_SIG_ALG"
+    assert findings[0].severity == Severity.CRITICAL
+    assert "md5" in findings[0].detail.lower()
+
+
+def test_weak_signing_case_insensitive() -> None:
+    estate = _estate(cas=(_ca("OldCA", certs=(_cert("CN=Old", sig_alg="SHA1"),)),))
+    assert len(detect_weak_signing(estate)) == 1
+
+
+def test_weak_signing_ignores_sha256() -> None:
+    estate = _estate(cas=(_ca("GoodCA", certs=(_cert("CN=Good", sig_alg="sha256"),)),))
+    assert detect_weak_signing(estate) == []
+
+
+def test_weak_signing_does_not_false_positive_on_sha256withrsa() -> None:
+    # "sha256WithRSAEncryption" must not match the sha1 branch via substring.
+    estate = _estate(
+        cas=(_ca("ModCA", certs=(_cert("CN=Mod", sig_alg="sha256WithRSAEncryption"),)),)
+    )
+    assert detect_weak_signing(estate) == []
+
+
+def test_weak_signing_flags_sha1withrsa() -> None:
+    estate = _estate(
+        cas=(_ca("OldCA", certs=(_cert("CN=Old", sig_alg="sha1WithRSAEncryption"),)),)
+    )
+    findings = detect_weak_signing(estate)
+    assert len(findings) == 1
+    assert findings[0].severity == Severity.HIGH
+
+
+def test_weak_signing_degrades_without_certs() -> None:
+    estate = _estate(
+        cas=(_ca("OldCA", certs=(_cert("CN=Old", sig_alg="sha1"),)),),
+        certs_parsed=False,
+    )
+    assert detect_weak_signing(estate) == []
+
+
+# --- hygiene: weak key length ----------------------------------------------
+
+
+def test_weak_key_size_1024_bit_ca_is_high() -> None:
+    estate = _estate(cas=(_ca("CA", certs=(_cert("CN=C", key_bits=1024),)),))
+    findings = detect_weak_key_size(estate)
+    ca_findings = [f for f in findings if f.check == "WEAK_KEY_SIZE"]
+    assert len(ca_findings) == 1
+    assert ca_findings[0].severity == Severity.HIGH
+
+
+def test_weak_key_size_under_1024_is_critical() -> None:
+    estate = _estate(cas=(_ca("CA", certs=(_cert("CN=C", key_bits=512),)),))
+    findings = detect_weak_key_size(estate)
+    ca_findings = [f for f in findings if f.check == "WEAK_KEY_SIZE"]
+    assert len(ca_findings) == 1
+    assert ca_findings[0].severity == Severity.CRITICAL
+
+
+def test_weak_key_size_between_1024_and_2048_is_medium() -> None:
+    estate = _estate(cas=(_ca("CA", certs=(_cert("CN=C", key_bits=1536),)),))
+    findings = detect_weak_key_size(estate)
+    ca_findings = [f for f in findings if f.check == "WEAK_KEY_SIZE"]
+    assert len(ca_findings) == 1
+    assert ca_findings[0].severity == Severity.MEDIUM
+
+
+def test_weak_key_size_skips_ecdsa_keys() -> None:
+    estate = _estate(
+        cas=(_ca("CA", certs=(_cert("CN=EC", key_bits=256, key_alg="ecdsa"),)),)
+    )
+    findings = detect_weak_key_size(estate)
+    assert all(f.check != "WEAK_KEY_SIZE" for f in findings)
+
+
+def test_weak_key_size_skips_dsa_keys() -> None:
+    estate = _estate(
+        cas=(_ca("CA", certs=(_cert("CN=DSA", key_bits=1024, key_alg="dsa"),)),)
+    )
+    findings = detect_weak_key_size(estate)
+    assert all(f.check != "WEAK_KEY_SIZE" for f in findings)
+
+
+def test_weak_key_size_2048_or_strong_is_clean() -> None:
+    estate = _estate(
+        cas=(_ca("CA", certs=(_cert("CN=C", key_bits=2048), _cert("CN=D", key_bits=4096))),)
+    )
+    assert detect_weak_key_size(estate) == []
+
+
+def test_weak_key_size_degrades_ca_part_without_certs() -> None:
+    estate = _estate(
+        cas=(_ca("CA", certs=(_cert("CN=C", key_bits=512),)),),
+        templates=(_template("T", min_key_size=512),),
+        certs_parsed=False,
+    )
+    findings = detect_weak_key_size(estate)
+    assert all(f.check == "WEAK_TEMPLATE_KEY_SIZE" for f in findings)
+
+
+def test_weak_template_key_size_high_below_1024() -> None:
+    estate = _estate(templates=(_template("Weak", min_key_size=512),))
+    findings = detect_weak_key_size(estate)
+    assert len(findings) == 1
+    assert findings[0].check == "WEAK_TEMPLATE_KEY_SIZE"
+    assert findings[0].severity == Severity.HIGH
+
+
+def test_weak_template_key_size_medium_1024() -> None:
+    estate = _estate(templates=(_template("Weak", min_key_size=1024),))
+    findings = detect_weak_key_size(estate)
+    assert len(findings) == 1
+    assert findings[0].check == "WEAK_TEMPLATE_KEY_SIZE"
+    assert findings[0].severity == Severity.MEDIUM
+
+
+def test_weak_template_key_size_clean_at_2048() -> None:
+    assert detect_weak_key_size(_estate(templates=(_template("OK", min_key_size=2048),))) == []
+
+
+# --- hygiene: audit configuration ------------------------------------------
+
+
+def test_audit_disabled_is_critical() -> None:
+    estate = _estate(cas=(_ca("CA", audit_filter=0),))
+    findings = detect_audit_config(estate)
+    assert len(findings) == 1
+    assert findings[0].check == "CA_AUDIT_DISABLED"
+    assert findings[0].severity == Severity.CRITICAL
+
+
+def test_audit_underscoped_flags_missing_categories() -> None:
+    # 0x7F (127) is the full Microsoft baseline; 0x1 + 0x4 = 5 -> missing Revoke,
+    # Change CA config, and Change CA security.
+    estate = _estate(cas=(_ca("CA", audit_filter=5),))
+    findings = detect_audit_config(estate)
+    assert len(findings) == 1
+    assert findings[0].check == "CA_AUDIT_UNDERSCOPED"
+    assert findings[0].severity == Severity.MEDIUM
+    assert "Revoke" in findings[0].detail
+    assert "Change CA config" in findings[0].detail
+    assert "Change CA security" in findings[0].detail
+
+
+def test_audit_full_baseline_clean() -> None:
+    estate = _estate(cas=(_ca("CA", audit_filter=127),))
+    assert detect_audit_config(estate) == []
+
+
+def test_audit_none_on_all_cas_degrades_to_note() -> None:
+    estate = _estate(cas=(_ca("CA", audit_filter=None),))
+    findings = detect_audit_config(estate)
+    assert len(findings) == 1
+    assert findings[0].check == "CA_AUDIT_NOT_EVALUATED"
+    assert findings[0].severity == Severity.INFO
+
+
+def test_audit_clean_ca_not_flagged_alongside_disabled() -> None:
+    estate = _estate(cas=(_ca("Good", audit_filter=127), _ca("Disabled", audit_filter=0)))
+    findings = detect_audit_config(estate)
+    assert len(findings) == 1
+    assert findings[0].subject == "Disabled"
+
+
+def test_audit_skips_none_ca_and_evaluates_valued_ca() -> None:
+    estate = _estate(cas=(_ca("Unknown", audit_filter=None), _ca("Disabled", audit_filter=0)))
+    findings = detect_audit_config(estate)
+    by_subj = {f.subject: f for f in findings}
+    # The valued CA is still evaluated and flagged.
+    assert by_subj["Disabled"].check == "CA_AUDIT_DISABLED"
+    # The unevaluated CA degrades to its own note rather than being dropped silently.
+    assert by_subj["Unknown"].check == "CA_AUDIT_NOT_EVALUATED"
+    assert by_subj["Unknown"].severity == Severity.INFO
+    assert len(findings) == 2
+
+
+def test_audit_only_noncritical_bits_flagged_as_underscoped() -> None:
+    # 0x80 is a non-baseline bit; with none of the 0x7F baseline set, the CA is
+    # under-scoped (not disabled) and every baseline category is named.
+    estate = _estate(cas=(_ca("Odd", audit_filter=0x80),))
+    findings = detect_audit_config(estate)
+    assert len(findings) == 1
+    assert findings[0].check == "CA_AUDIT_UNDERSCOPED"
+    assert findings[0].severity == Severity.MEDIUM
+    for name in _AUDIT_CATEGORIES.values():
+        assert name in findings[0].detail
+
+
+def test_audit_extra_bits_beyond_baseline_still_clean() -> None:
+    # Baseline (0x7F) fully present plus a non-baseline bit is still complete.
+    estate = _estate(cas=(_ca("Full", audit_filter=0x7F | 0x80),))
+    assert detect_audit_config(estate) == []
+
+
+# --- run_all wiring --------------------------------------------------------
+
+
+def test_run_all_includes_new_hygiene_detectors() -> None:
+    estate = _estate(
+        cas=(
+            _ca(
+                "AuditCA",
+                audit_filter=0,
+                certs=(_cert("CN=C", sig_alg="sha1", key_bits=1024),),
+            ),
+        ),
+        templates=(_template("WeakKey", min_key_size=1024),),
+    )
+    checks = {f.check for f in run_all(estate)}
+    assert "WEAK_SIG_ALG" in checks
+    assert "WEAK_KEY_SIZE" in checks
+    assert "WEAK_TEMPLATE_KEY_SIZE" in checks
+    assert "CA_AUDIT_DISABLED" in checks
 
 
 def test_esc5_suppressed_when_control_right_denied() -> None:

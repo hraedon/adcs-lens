@@ -102,16 +102,22 @@ scripts/Export-AdcsEstate.ps1 -OutputDir C:\AdcsExport
 # Copy the export to your analysis machine, then:
 adcs-lens ingest C:\AdcsExport
 adcs-lens doctor C:\AdcsExport            # prioritized posture + lifecycle findings
-adcs-lens doctor C:\AdcsExport --json     # stable JSON envelope
+adcs-lens doctor C:\AdcsExport --json     # stable JSON envelope (with consequences)
+adcs-lens doctor C:\AdcsExport --sarif    # SARIF v2.1.0 for CI / GRC integration
 adcs-lens diff  OLD\Export NEW\Export     # Stance 2: what got worse / better since the baseline
 adcs-lens diff  OLD NEW --exit-code       # non-zero on regressions (for scheduled scans)
 ```
 
 > Status: the deterministic core is built and tested (ingest → `doctor`) with
 > **ESC1**, **ESC2**, **ESC3**, **ESC4**, **ESC5**, **ESC6**, **ESC7**, **ESC8**,
-> **ESC9**, **ESC10**, **ESC11**, **ESC13**, **ESC14** and infrastructure
-> cert/CRL-expiry detectors. Per-template ACL-gap detection
-> (`TEMPLATE_ACL_UNREADABLE`) is also built.
+> **ESC9**, **ESC10**, **ESC11**, **ESC13**, **ESC14**, **ESC15** and
+> infrastructure cert/CRL-expiry detectors, plus crypto/operational hygiene
+> detectors (`WEAK_SIG_ALG`, `WEAK_KEY_SIZE` / `WEAK_TEMPLATE_KEY_SIZE`,
+> `CA_AUDIT_DISABLED` / `CA_AUDIT_UNDERSCOPED`). Per-template ACL-gap detection
+> (`TEMPLATE_ACL_UNREADABLE`) is also built. Every finding carries a
+> plain-language **consequences** entry (summary, risk, remediation) in the text
+> and JSON output, and `doctor --sarif` emits SARIF v2.1.0 for CI / GRC
+> integration.
 > The read-only PowerShell **collector** (`scripts/Export-AdcsEstate.ps1`) is
 > built and validated end-to-end against a live enterprise CA — including the
 > PKI-object ACL pass (NTAuth / AIA / CDP / PKS containers + CA objects) that
@@ -133,14 +139,17 @@ adcs-lens diff  OLD NEW --exit-code       # non-zero on regressions (for schedul
 ## Status
 
 Core built (Plan 001 Phases 0, 1, 2, 3) with ESC1/2/3/4/5/6/7/8/9/10/11/13/14/15
-detectors and infrastructure cert/CRL-expiry checks — the full ESC family the
-threat model marks statically detectable. The collector — including the opt-in
-ESC10/ESC14 DC certificate-mapping passes — is validated against the live lab.
-Remaining: a live *positive* (vulnerable-config) validation for the newer
-detectors (ESC10/11/13/14 were negative-validated live and positive-validated on
-the synthetic fixture). Stance-2 drift detection (`diff`) is built: it diffs the
-findings of two read-only exports and reports regressions / fixes / severity
-changes, with `--exit-code` for scheduled-scan gating — no live access.
+detectors, infrastructure cert/CRL-expiry checks, and crypto/operational hygiene
+detectors (weak signing algorithm, weak CA/template key size, CA audit
+configuration) — the full ESC family and statically-detectable hygiene rows the
+threat model marks. The collector — including the opt-in ESC10/ESC14 DC
+certificate-mapping passes — is validated against the live lab. Remaining: a live
+*positive* (vulnerable-config) validation for the newer detectors (ESC10/11/13/14
+were negative-validated live and positive-validated on the synthetic fixture).
+Stance-2 drift detection (`diff`) is built: it diffs the findings of two
+read-only exports and reports regressions / fixes / severity changes, with
+`--exit-code` for scheduled-scan gating — no live access. A threat-model ↔
+detector traceability test locks the design spine against drift.
 Foundational docs:
 - [`docs/threat-model.md`](docs/threat-model.md) — the ESC + hygiene catalogue
   with the static-detectability boundary. **Start here.**

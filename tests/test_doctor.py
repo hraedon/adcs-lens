@@ -16,7 +16,7 @@ def test_doctor_json_flags_esc6(json_export: Path, capsys: pytest.CaptureFixture
     assert rc == 0
     envelope = json.loads(capsys.readouterr().out)
     assert envelope["kind"] == "doctor"
-    assert envelope["schema_version"] == 1
+    assert envelope["schema_version"] == 2
     checks = {f["check"] for f in envelope["findings"]}
     assert "ESC6" in checks
     # The fixture template sets NO_SECURITY_EXTENSION -> ESC9 surfaces end-to-end.
@@ -25,6 +25,10 @@ def test_doctor_json_flags_esc6(json_export: Path, capsys: pytest.CaptureFixture
     assert "ESC7" in checks
     esc6 = next(f for f in envelope["findings"] if f["check"] == "ESC6")
     assert esc6["severity"] == Severity.CRITICAL.value
+    assert isinstance(esc6["consequence"], dict)
+    assert "summary" in esc6["consequence"]
+    assert "consequence" in esc6["consequence"]
+    assert "remediation" in esc6["consequence"]
 
 
 def test_doctor_text_renders(json_export: Path, capsys: pytest.CaptureFixture[str]) -> None:

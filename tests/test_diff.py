@@ -102,6 +102,7 @@ def test_cli_diff_no_drift_identical_exports(
     assert rc == 0
     env = json.loads(capsys.readouterr().out)
     assert env["kind"] == "diff"
+    assert env["schema_version"] == 2
     assert env["summary"]["new"] == 0
     assert env["summary"]["resolved"] == 0
     assert env["summary"]["regressions"] is False
@@ -124,3 +125,27 @@ def test_cli_diff_text_renders_no_drift(
 ) -> None:
     assert main(["diff", str(json_export), str(json_export)]) == 0
     assert "no drift" in capsys.readouterr().out
+
+
+def test_cli_diff_json_new_findings_embed_consequence(
+    json_export: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc = main(["diff", str(tmp_path), str(json_export), "--json"])
+    assert rc == 0
+    env = json.loads(capsys.readouterr().out)
+    assert env["summary"]["new"] > 0
+    for f in env["new"]:
+        assert "consequence" in f
+        assert isinstance(f["consequence"], dict)
+        assert "summary" in f["consequence"]
+        assert "consequence" in f["consequence"]
+        assert "remediation" in f["consequence"]
+
+
+def test_cli_diff_text_new_finding_shows_plain_terms(
+    json_export: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["diff", str(tmp_path), str(json_export)]) == 0
+    out = capsys.readouterr().out
+    assert "in plain terms:" in out
+    assert "how to fix:" in out

@@ -1,4 +1,4 @@
-"""Rendering of findings — text and JSON. Pure, stdlib-only.
+"""Rendering of findings — text, JSON, and SARIF. Pure, stdlib-only.
 
 The JSON envelope is the stable contract the later narration/report layers will
 consume, so it is versioned and emitted even when there are zero findings.
@@ -10,11 +10,21 @@ import json
 from collections import Counter
 from dataclasses import asdict
 
+from adcs_lens import __version__
+from adcs_lens.consequences import consequence_for
 from adcs_lens.detection import Finding
 from adcs_lens.diff import DriftReport
 from adcs_lens.model import Severity
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+_SARIF_LEVEL: dict[Severity, str] = {
+    Severity.CRITICAL: "error",
+    Severity.HIGH: "error",
+    Severity.MEDIUM: "warning",
+    Severity.LOW: "note",
+    Severity.INFO: "none",
+}
 
 
 def summarize(findings: list[Finding]) -> dict[str, int]:
@@ -23,13 +33,28 @@ def summarize(findings: list[Finding]) -> dict[str, int]:
     return {sev.value: counts.get(sev.value, 0) for sev in Severity}
 
 
+def _finding_with_consequence(f: Finding) -> dict[str, object]:
+    """Serialize a finding with its plain-language consequence attached."""
+    data = asdict(f)
+    entry = consequence_for(f.check)
+    if entry is None:
+        data["consequence"] = None
+    else:
+        data["consequence"] = {
+            "summary": entry.summary,
+            "consequence": entry.consequence,
+            "remediation": entry.remediation,
+        }
+    return data
+
+
 def render_json(findings: list[Finding]) -> str:
     """Serialize findings + summary as a stable JSON envelope."""
     envelope = {
         "schema_version": SCHEMA_VERSION,
         "kind": "doctor",
         "summary": summarize(findings),
-        "findings": [asdict(f) for f in findings],
+        "findings": [_finding_with_consequence(f) for f in findings],
     }
     return json.dumps(envelope, indent=2, sort_keys=True)
 
@@ -50,6 +75,10 @@ def render_text(findings: list[Finding]) -> str:
         lines.append(f"  {f.title}")
         lines.append(f"  {f.detail}")
         lines.append(f"  source: {f.source}")
+        entry = consequence_for(f.check)
+        if entry is not None:
+            lines.append(f"  in plain terms: {entry.summary} {entry.consequence}")
+            lines.append(f"  how to fix: {entry.remediation}")
     return "\n".join(lines)
 
 
@@ -65,8 +94,8 @@ def render_diff_json(report: DriftReport) -> str:
             "unchanged": report.unchanged,
             "regressions": report.regressions,
         },
-        "new": [asdict(f) for f in report.new],
-        "resolved": [asdict(f) for f in report.resolved],
+        "new": [_finding_with_consequence(f) for f in report.new],
+        "resolved": [_finding_with_consequence(f) for f in report.resolved],
         "changed": [
             {
                 "check": d.new.check,
@@ -94,6 +123,10 @@ def render_diff_text(report: DriftReport) -> str:
     for f in report.new:
         lines.append(f"\n[+ NEW] [{f.severity.value.upper()}] {f.check}  {f.subject}")
         lines.append(f"  {f.title}")
+        entry = consequence_for(f.check)
+        if entry is not None:
+            lines.append(f"  in plain terms: {entry.summary} {entry.consequence}")
+            lines.append(f"  how to fix: {entry.remediation}")
     for d in report.changed:
         arrow = "worse" if d.worsened else "better"
         lines.append(
@@ -104,3 +137,76 @@ def render_diff_text(report: DriftReport) -> str:
         lines.append(f"\n[- RESOLVED] [{f.severity.value.upper()}] {f.check}  {f.subject}")
         lines.append(f"  {f.title}")
     return "\n".join(lines)
+
+
+def render_sarif(findings: list[Finding]) -> str:
+    """Render findings as a SARIF v2.1.0 log for CI / GRC integration.
+
+    SARIF is the OASIS JSON format that CI systems (GitHub Code Scanning, Azure
+    DevOps) and GRC tools consume natively. Rules are de-duplicated by check id
+    and sorted so ``ruleIndex`` references are deterministic; results preserve
+    the input (worst-first) order. AD CS objects are not files, so the source
+    fact is placed in ``logicalLocations`` rather than ``artifactLocation.uri``,
+    which would require a valid URI.
+    """
+    check_ids = sorted({f.check for f in findings})
+    index_by_check: dict[str, int] = {check: i for i, check in enumerate(check_ids)}
+
+    rules: list[dict[str, object]] = []
+    for check in check_ids:
+        entry = consequence_for(check)
+        if entry is not None:
+            rules.append(
+                {
+                    "id": check,
+                    "name": check,
+                    "shortDescription": {"text": entry.summary},
+                    "fullDescription": {"text": entry.consequence},
+                    "help": {"text": entry.remediation},
+                }
+            )
+        else:
+            rules.append(
+                {
+                    "id": check,
+                    "name": check,
+                    "shortDescription": {"text": check},
+                }
+            )
+
+    results: list[dict[str, object]] = []
+    for f in findings:
+        tier_suffix = f" ({f.tier.value}-tier)" if f.tier is not None else ""
+        results.append(
+            {
+                "ruleId": f.check,
+                "ruleIndex": index_by_check[f.check],
+                "level": _SARIF_LEVEL[f.severity],
+                "message": {"text": f"{f.title}: {f.detail}{tier_suffix}"},
+                "logicalLocations": [
+                    {
+                        "fullyQualifiedName": f.source,
+                        "name": f.subject,
+                    },
+                ],
+            }
+        )
+
+    sarif = {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "adcs-lens",
+                        "version": __version__,
+                        "informationUri": "https://github.com/hraedon/adcs-lens",
+                        "rules": rules,
+                    },
+                },
+                "results": results,
+            },
+        ],
+    }
+    return json.dumps(sarif, indent=2, sort_keys=True)

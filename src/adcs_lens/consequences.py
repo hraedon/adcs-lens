@@ -1,0 +1,462 @@
+"""Plain-language consequences catalogue.
+
+Pure data mapping each detector check identifier to a non-technical summary,
+business risk, and remediation. Used by the display and report layers; no AI.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ConsequenceEntry:
+    """Plain-language explanation of one finding type."""
+
+    check: str
+    summary: str
+    consequence: str
+    remediation: str
+
+
+CONSEQUENCES: dict[str, ConsequenceEntry] = {
+    "ESC1": ConsequenceEntry(
+        check="ESC1",
+        summary=(
+            "A certificate template lets ordinary users choose the name on the certificate "
+            "and enroll without manager approval."
+        ),
+        consequence=(
+            "An attacker can request a certificate that names a privileged account such as a "
+            "domain administrator, then use it to authenticate as that account and take control "
+            "of the domain."
+        ),
+        remediation=(
+            "Disable the 'enrollee supplies subject' setting on the template, require CA manager "
+            "approval for enrollments, and restrict Enroll rights to only approved groups."
+        ),
+    ),
+    "ESC2": ConsequenceEntry(
+        check="ESC2",
+        summary=(
+            "A certificate template has no usage restrictions (no EKU or an any-purpose EKU) "
+            "and is enrollable by ordinary users."
+        ),
+        consequence=(
+            "An attacker obtains a certificate in their own name that is valid for any purpose, "
+            "including client authentication — a credential usable far beyond what the template "
+            "should have authorized."
+        ),
+        remediation=(
+            "Limit the template to the specific certificate usages it actually needs, and "
+            "restrict Enroll rights to approved groups."
+        ),
+    ),
+    "ESC3": ConsequenceEntry(
+        check="ESC3",
+        summary=(
+            "A certificate template grants the Enrollment Agent right and is enrollable by "
+            "ordinary users."
+        ),
+        consequence=(
+            "An attacker can request certificates on behalf of other principals, including "
+            "higher-privilege accounts, without needing their credentials."
+        ),
+        remediation=(
+            "Restrict Enrollment Agent templates to tightly controlled groups and require CA "
+            "manager approval for enrollments."
+        ),
+    ),
+    "ESC4": ConsequenceEntry(
+        check="ESC4",
+        summary="An ordinary user has edit control over a certificate template object.",
+        consequence=(
+            "An attacker can change the template settings to create an ESC1 path, for example by "
+            "allowing enrollee-supplied names and adding a client-authentication EKU, then "
+            "request a domain-admin certificate."
+        ),
+        remediation=(
+            "Remove delegated write, modify, or change-permissions rights from low-privilege "
+            "users on certificate templates."
+        ),
+    ),
+    "ESC5": ConsequenceEntry(
+        check="ESC5",
+        summary=(
+            "An ordinary user can modify a critical Public Key Services object in "
+            "Active Directory."
+        ),
+        consequence=(
+            "Depending on which object is writable, an attacker can make a rogue certificate "
+            "authority trusted estate-wide (NTAuth), alter a CA's published templates and "
+            "enrollment configuration (CA object), create rogue child objects such as a malicious "
+            "template (Public Key Services container), or tamper with certificate chain and "
+            "revocation data (AIA / CDP)."
+        ),
+        remediation=(
+            "Remove delegated control over NTAuthCertificates, CA objects, and the Public Key "
+            "Services, AIA, and CDP containers."
+        ),
+    ),
+    "ESC6": ConsequenceEntry(
+        check="ESC6",
+        summary=(
+            "A certificate authority is configured to honor subject names supplied by "
+            "the requester."
+        ),
+        consequence=(
+            "An attacker can put any identity, such as a domain administrator, into a certificate "
+            "request on any template the CA issues, and then authenticate as that identity."
+        ),
+        remediation=(
+            "Remove the EDITF_ATTRIBUTESUBJECTALTNAME2 flag from the CA policy registry and "
+            "restart the certificate service."
+        ),
+    ),
+    "ESC7": ConsequenceEntry(
+        check="ESC7",
+        summary="A low-privilege principal holds CA manager or certificate-officer rights on a CA.",
+        consequence=(
+            "With Manage Certificates, the holder can approve pending requests and issue "
+            "attacker-chosen certificates. With Manage CA, they can additionally change CA policy "
+            "to enable other escalation paths, such as requester-supplied SANs."
+        ),
+        remediation=(
+            "Remove non-administrative principals from the Manage CA and Manage Certificates "
+            "roles on certificate authorities."
+        ),
+    ),
+    "ESC8": ConsequenceEntry(
+        check="ESC8",
+        summary=(
+            "A web-based enrollment endpoint accepts NTLM authentication without channel "
+            "binding."
+        ),
+        consequence=(
+            "This is the configuration an NTLM-relay attack requires: if an attacker can coerce a "
+            "privileged account to authenticate here, they could relay that authentication and "
+            "obtain a certificate as that account. The relay itself is not confirmed by this "
+            "read-only check."
+        ),
+        remediation=(
+            "Require HTTPS-only access, enforce Extended Protection for Authentication, and "
+            "disable or restrict NTLM on enrollment endpoints."
+        ),
+    ),
+    "ESC9": ConsequenceEntry(
+        check="ESC9",
+        summary="A certificate template issues certificates that omit the SID security extension.",
+        consequence=(
+            "Without the SID binding, a certificate can be mapped to a different account on a "
+            "domain controller that does not enforce strong certificate binding, enabling "
+            "impersonation of privileged accounts."
+        ),
+        remediation=(
+            "Clear the NO_SECURITY_EXTENSION flag on the template unless a specific, approved "
+            "mapping scenario explicitly requires it."
+        ),
+    ),
+    "ESC10": ConsequenceEntry(
+        check="ESC10",
+        summary="A domain controller is configured to accept weak certificate-to-account mappings.",
+        consequence=(
+            "An attacker who can obtain or influence the matching field, such as a user principal "
+            "name, can authenticate as another account using a certificate."
+        ),
+        remediation=(
+            "Set StrongCertificateBindingEnforcement to 2 (Full) on every domain controller and "
+            "clear the UPN mapping bit from Schannel CertificateMappingMethods."
+        ),
+    ),
+    "ESC11": ConsequenceEntry(
+        check="ESC11",
+        summary=(
+            "A certificate authority's RPC enrollment interface does not require encrypted "
+            "requests."
+        ),
+        consequence=(
+            "This is the configuration an NTLM-relay attack against the RPC enrollment interface "
+            "requires: if an attacker can coerce a privileged account to authenticate, they could "
+            "relay that authentication and request a certificate as that account. The relay itself "
+            "is not confirmed by this read-only check."
+        ),
+        remediation=(
+            "Enable the IF_ENFORCEENCRYPTICERTREQUEST flag on every non-root CA and restart the "
+            "certificate service."
+        ),
+    ),
+    "ESC13": ConsequenceEntry(
+        check="ESC13",
+        summary=(
+            "A certificate template links an issuance policy to a privileged group and is "
+            "enrollable by ordinary users."
+        ),
+        consequence=(
+            "Authenticating with the issued certificate grants the holder the membership and "
+            "privileges of the linked group, which may be domain-wide administrators."
+        ),
+        remediation=(
+            "Remove the OID-to-group link on the issuance policy, restrict Enroll rights, or "
+            "require CA manager approval on the template."
+        ),
+    ),
+    "ESC14": ConsequenceEntry(
+        check="ESC14",
+        summary=(
+            "An account has an explicit weak certificate mapping that can be reproduced by an "
+            "attacker."
+        ),
+        consequence=(
+            "An attacker who obtains a certificate matching the reusable mapping fields can "
+            "authenticate as the mapped account, including privileged service accounts."
+        ),
+        remediation=(
+            "Replace weak altSecurityIdentities mappings with strong, non-reusable forms such as "
+            "issuer plus serial number, SKI, or SHA1 public-key hash, and enforce strong binding."
+        ),
+    ),
+    "ESC15": ConsequenceEntry(
+        check="ESC15",
+        summary="An old schema version 1 certificate template is enrollable by ordinary users.",
+        consequence=(
+            "On a certificate authority that is not patched for CVE-2024-49019, the requester can "
+            "inject arbitrary certificate usages such as Client Authentication into the request, "
+            "turning the template into an ESC1 or ESC3 escalation path."
+        ),
+        remediation=(
+            "Patch the CA for CVE-2024-49019, upgrade the template to schema version 2 or later, "
+            "and restrict Enroll rights."
+        ),
+    ),
+    "CA_CERT_EXPIRY": ConsequenceEntry(
+        check="CA_CERT_EXPIRY",
+        summary="A certificate authority certificate has expired or is about to expire.",
+        consequence=(
+            "Expired or soon-to-expire CA certificates cause certificate validation failures, "
+            "breaking authentication, signing, and applications that rely on the PKI."
+        ),
+        remediation=(
+            "Renew the CA certificate before expiry and update distribution points; treat root-CA "
+            "renewal as an estate-wide change-control event."
+        ),
+    ),
+    "CRL_EXPIRY": ConsequenceEntry(
+        check="CRL_EXPIRY",
+        summary="A published certificate revocation list has passed its next update time.",
+        consequence=(
+            "Clients that fetch the CRL will reject certificates issued by the CA, causing "
+            "widespread authentication and service outages until a fresh CRL is published."
+        ),
+        remediation=(
+            "Publish a fresh CRL immediately and verify that CRL distribution points are reachable "
+            "and monitored."
+        ),
+    ),
+    "TEMPLATE_ACL_UNREADABLE": ConsequenceEntry(
+        check="TEMPLATE_ACL_UNREADABLE",
+        summary="The export could not read the access-control list for one certificate template.",
+        consequence=(
+            "The tool cannot determine whether this template has dangerous enroll or control "
+            "rights, so associated ESC risks remain unverified and could be hidden."
+        ),
+        remediation=(
+            "Re-run the collector with permissions sufficient to read each certificate template's "
+            "nTSecurityDescriptor."
+        ),
+    ),
+    "TEMPLATE_ACL_NOT_EVALUATED": ConsequenceEntry(
+        check="TEMPLATE_ACL_NOT_EVALUATED",
+        summary="Template security descriptors were not collected in this export.",
+        consequence=(
+            "The tool cannot rule out ESC1, ESC2, ESC3, ESC4, ESC13, or ESC15 on any template, so "
+            "the posture for template-based escalation is unverified."
+        ),
+        remediation=(
+            "Re-run the collector with the template-security pass enabled to capture template "
+            "access-control entries."
+        ),
+    ),
+    "PKI_ACL_NOT_EVALUATED": ConsequenceEntry(
+        check="PKI_ACL_NOT_EVALUATED",
+        summary="Public Key Services object permissions were not collected in this export.",
+        consequence=(
+            "The tool cannot rule out ESC5, including writable NTAuth certificates, CA objects, or "
+            "PKS containers, so the posture for trust-tampering is unverified."
+        ),
+        remediation=(
+            "Re-run the collector with the pki-acls pass enabled to capture PKI object "
+            "access-control entries."
+        ),
+    ),
+    "CA_SECURITY_NOT_EVALUATED": ConsequenceEntry(
+        check="CA_SECURITY_NOT_EVALUATED",
+        summary="The CA security descriptor and role rights were not collected in this export.",
+        consequence=(
+            "The tool cannot rule out ESC7, so it is unverified whether low-privilege principals "
+            "hold Manage CA or Manage Certificates rights."
+        ),
+        remediation=(
+            "Re-run the collector with the ca-security pass enabled to capture CA\\Security "
+            "access-control entries."
+        ),
+    ),
+    "ENROLLMENT_ENDPOINTS_NOT_EVALUATED": ConsequenceEntry(
+        check="ENROLLMENT_ENDPOINTS_NOT_EVALUATED",
+        summary="IIS enrollment endpoint configuration was not collected in this export.",
+        consequence=(
+            "The tool cannot rule out ESC8, so it is unverified whether web or CES enrollment "
+            "endpoints are exposed to NTLM relay."
+        ),
+        remediation=(
+            "Re-run the collector with the enrollment-endpoints pass enabled to capture IIS "
+            "bindings, authentication providers, and Extended Protection settings."
+        ),
+    ),
+    "DC_REGISTRY_NOT_EVALUATED": ConsequenceEntry(
+        check="DC_REGISTRY_NOT_EVALUATED",
+        summary=(
+            "Domain-controller certificate-mapping registry values were not collected in this "
+            "export."
+        ),
+        consequence=(
+            "The tool cannot rule out ESC10, so it is unverified whether domain controllers accept "
+            "weak certificate mappings."
+        ),
+        remediation=(
+            "Re-run the collector with the esc10-dc-registry pass enabled to capture "
+            "StrongCertificateBindingEnforcement and Schannel CertificateMappingMethods."
+        ),
+    ),
+    "ALTSECID_NOT_EVALUATED": ConsequenceEntry(
+        check="ALTSECID_NOT_EVALUATED",
+        summary="Principal altSecurityIdentities mappings were not collected in this export.",
+        consequence=(
+            "The tool cannot rule out ESC14, so it is unverified whether any accounts have weak "
+            "explicit certificate mappings."
+        ),
+        remediation=(
+            "Re-run the collector with the esc14-altsecid pass enabled to capture principal "
+            "altSecurityIdentities values."
+        ),
+    ),
+    "ESC10_ENFORCEMENT_UNKNOWN": ConsequenceEntry(
+        check="ESC10_ENFORCEMENT_UNKNOWN",
+        summary=(
+            "The domain controller's strong certificate binding enforcement could not be "
+            "confirmed."
+        ),
+        consequence=(
+            "Without confirming the registry value, the tool cannot rule out the ESC10 case 2 "
+            "weak-mapping path; the actual posture may be stricter or weaker than expected."
+        ),
+        remediation=(
+            "Set StrongCertificateBindingEnforcement to 2 (Full) explicitly and re-collect the DC "
+            "registry values."
+        ),
+    ),
+    "ESC14_ENFORCEMENT_UNKNOWN": ConsequenceEntry(
+        check="ESC14_ENFORCEMENT_UNKNOWN",
+        summary=(
+            "Weak explicit certificate mappings exist, but domain-controller enforcement is "
+            "unknown."
+        ),
+        consequence=(
+            "The weak mappings are present, yet the tool cannot determine whether domain "
+            "controllers enforce strong binding, so ESC14 exploitability is uncertain."
+        ),
+        remediation=(
+            "Confirm DC registry collection succeeds, set StrongCertificateBindingEnforcement to "
+            "2 (Full), and replace weak mappings with strong forms."
+        ),
+    ),
+    "WEAK_SIG_ALG": ConsequenceEntry(
+        check="WEAK_SIG_ALG",
+        summary="A certificate authority certificate is signed with SHA-1 or MD5.",
+        consequence=(
+            "Cryptographic collision attacks against SHA-1 and MD5 are practical, so an attacker "
+            "who can craft a collision could forge a certificate that chains to the CA."
+        ),
+        remediation=(
+            "Reissue the CA certificate and all chain certificates using SHA-256 or stronger, and "
+            "configure the CA to issue only with modern signature algorithms."
+        ),
+    ),
+    "WEAK_KEY_SIZE": ConsequenceEntry(
+        check="WEAK_KEY_SIZE",
+        summary="A certificate authority certificate uses an RSA key shorter than 2048 bits.",
+        consequence=(
+            "Smaller RSA keys are increasingly factorable, so an attacker who recovers the CA or "
+            "sub-CA private key can issue fraudulent certificates that clients trust."
+        ),
+        remediation=(
+            "Reissue the CA certificate with a 2048-bit or larger RSA key (4096-bit preferred for "
+            "root and long-lived certificates)."
+        ),
+    ),
+    "WEAK_TEMPLATE_KEY_SIZE": ConsequenceEntry(
+        check="WEAK_TEMPLATE_KEY_SIZE",
+        summary="A certificate template allows requests with RSA keys shorter than 2048 bits.",
+        consequence=(
+            "Certificates issued from this template may carry short, weak keys that are easier "
+            "to factor, undermining the confidentiality or integrity the certificate protects."
+        ),
+        remediation=(
+            "Set the template's msPKI-Minimal-Key-Size to 2048 or higher so only acceptably "
+            "strong keys can be requested."
+        ),
+    ),
+    "CA_AUDIT_DISABLED": ConsequenceEntry(
+        check="CA_AUDIT_DISABLED",
+        summary="Certificate authority auditing is fully disabled (AuditFilter is 0).",
+        consequence=(
+            "No CA security events are written to the log, so malicious issuance, policy changes, "
+            "or CA stop/start activity cannot be detected or investigated."
+        ),
+        remediation=(
+            "Enable the full audit baseline: certutil -setreg CA\\AuditFilter 127, then restart "
+            "the certificate service."
+        ),
+    ),
+    "CA_AUDIT_UNDERSCOPED": ConsequenceEntry(
+        check="CA_AUDIT_UNDERSCOPED",
+        summary="Certificate authority auditing is enabled but missing event categories.",
+        consequence=(
+            "Gaps in the audit filter mean important CA events such as certificate issuance, "
+            "revocation, backup, or configuration changes are not recorded, delaying incident "
+            "detection."
+        ),
+        remediation=(
+            "Enable the full audit baseline: certutil -setreg CA\\AuditFilter 127, then restart "
+            "the certificate service."
+        ),
+    ),
+    "CA_AUDIT_NOT_EVALUATED": ConsequenceEntry(
+        check="CA_AUDIT_NOT_EVALUATED",
+        summary="The export did not include certificate authority audit filter settings.",
+        consequence=(
+            "The tool cannot determine whether CA auditing is disabled or under-scoped, so audit "
+            "configuration weaknesses may be hidden."
+        ),
+        remediation=(
+            "Re-run the collector with the CA registry pass enabled to capture CA\\AuditFilter, "
+            "then review and enforce the recommended baseline of 127."
+        ),
+    ),
+    "LIFECYCLE_NOT_EVALUATED": ConsequenceEntry(
+        check="LIFECYCLE_NOT_EVALUATED",
+        summary="The export was ingested without parsing DER certificates and CRLs.",
+        consequence=(
+            "The tool cannot detect expired or soon-to-expire CA certificates and CRLs, so "
+            "lifecycle failures are hidden for this run."
+        ),
+        remediation=(
+            "Install the optional certificates extra and re-ingest the export with DER cert/CRL "
+            "parsing enabled."
+        ),
+    ),
+}
+
+
+def consequence_for(check: str) -> ConsequenceEntry | None:
+    """Return the plain-language entry for *check*, or None if unknown."""
+    return CONSEQUENCES.get(check)

@@ -13,7 +13,16 @@ import ast
 import sys
 from pathlib import Path
 
-CORE_MODULES = ["__init__", "model", "normalize", "ingest", "detection", "display", "cli"]
+CORE_MODULES = [
+    "__init__",
+    "model",
+    "normalize",
+    "ingest",
+    "detection",
+    "consequences",
+    "display",
+    "cli",
+]
 _SRC = Path(__file__).resolve().parent.parent / "src" / "adcs_lens"
 _FIXTURE = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "build_fixture.py"
 

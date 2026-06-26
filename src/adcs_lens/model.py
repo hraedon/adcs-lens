@@ -183,6 +183,7 @@ class CertLifecycle:
     not_after: datetime | None
     sig_alg: str
     key_bits: int | None
+    key_alg: str
 
 
 @dataclass(frozen=True)

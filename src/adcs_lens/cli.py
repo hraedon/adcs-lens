@@ -1,7 +1,7 @@
 """Command-line front door. Stdlib ``argparse`` only.
 
     adcs-lens ingest <export-dir>            # parse + summarize an export
-    adcs-lens doctor <export-dir> [--json]   # prioritized posture + lifecycle
+    adcs-lens doctor <export-dir> [--json|--sarif]   # prioritized posture + lifecycle
 """
 
 from __future__ import annotations
@@ -14,7 +14,13 @@ from collections.abc import Sequence
 from adcs_lens import __version__
 from adcs_lens.detection import run_all
 from adcs_lens.diff import diff_findings
-from adcs_lens.display import render_diff_json, render_diff_text, render_json, render_text
+from adcs_lens.display import (
+    render_diff_json,
+    render_diff_text,
+    render_json,
+    render_sarif,
+    render_text,
+)
 from adcs_lens.ingest import IngestError, ingest
 from adcs_lens.model import SEVERITY_RANK, Severity
 
@@ -32,7 +38,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_doctor = sub.add_parser("doctor", help="Prioritized posture + lifecycle findings.")
     p_doctor.add_argument("export_dir", help="Directory produced by the collector.")
-    p_doctor.add_argument("--json", action="store_true", help="Emit the JSON envelope.")
+    fmt = p_doctor.add_mutually_exclusive_group()
+    fmt.add_argument("--json", action="store_true", help="Emit the JSON envelope.")
+    fmt.add_argument(
+        "--sarif",
+        action="store_true",
+        help="Emit SARIF v2.1.0 output for CI / GRC integration.",
+    )
     p_doctor.add_argument(
         "--warn-days",
         type=int,
@@ -95,6 +107,7 @@ def _cmd_doctor(
     export_dir: str,
     *,
     as_json: bool,
+    as_sarif: bool,
     warn_days: int,
     severity: str,
     exit_code: bool,
@@ -105,7 +118,12 @@ def _cmd_doctor(
     # Lower rank == worse; keep findings at or above the requested floor.
     findings = [f for f in all_findings if SEVERITY_RANK[f.severity] <= min_rank]
 
-    print(render_json(findings) if as_json else render_text(findings))
+    if as_sarif:
+        print(render_sarif(findings))
+    elif as_json:
+        print(render_json(findings))
+    else:
+        print(render_text(findings))
 
     # `findings` is already filtered to the threshold, so any survivor trips the gate.
     if exit_code and findings:
@@ -146,6 +164,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _cmd_doctor(
                 args.export_dir,
                 as_json=args.json,
+                as_sarif=args.sarif,
                 warn_days=args.warn_days,
                 severity=args.severity,
                 exit_code=args.exit_code,

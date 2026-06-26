@@ -33,6 +33,17 @@ def _sig_alg(cert: x509.Certificate) -> str:
     return name.lower()
 
 
+def _key_alg(cert: x509.Certificate) -> str:
+    pub = cert.public_key()
+    if isinstance(pub, rsa.RSAPublicKey):
+        return "rsa"
+    if isinstance(pub, ec.EllipticCurvePublicKey):
+        return "ecdsa"
+    if isinstance(pub, dsa.DSAPublicKey):
+        return "dsa"
+    return "unknown"
+
+
 def parse_cert(der: bytes, *, kind: CertKind) -> CertLifecycle:
     """Parse a DER certificate into :class:`CertLifecycle`."""
     cert = x509.load_der_x509_certificate(der)
@@ -43,6 +54,7 @@ def parse_cert(der: bytes, *, kind: CertKind) -> CertLifecycle:
         not_after=cert.not_valid_after_utc,
         sig_alg=_sig_alg(cert),
         key_bits=_key_bits(cert),
+        key_alg=_key_alg(cert),
     )
 
 

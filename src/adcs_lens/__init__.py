@@ -1,7 +1,7 @@
 """adcs-lens — local-first, read-only AD CS / PKI posture analysis.
 
 The deterministic core (``model``, ``normalize``, ``ingest``, ``detection``,
-``display``) imports only the standard library. Cert/CRL parsing lives behind
+``consequences``, ``display``) imports only the standard library. Cert/CRL parsing lives behind
 the optional ``[certs]`` extra (``certs`` module); narration and web are later,
 optional layers that import the core, never the reverse.
 """

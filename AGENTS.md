@@ -106,6 +106,16 @@ reverted with cleanup discipline). The ESC13 validation caught a collector bug: 
 read the OID→group link from the non-existent `msPKI-OIDToGroupLink` instead of
 `msDS-OIDToGroupLink` (a group DN), so ESC13 was a permanent false negative.
 
+The **value-delivery layer** is now built on top of the detection core:
+crypto/operational hygiene detectors (`WEAK_SIG_ALG`, `WEAK_KEY_SIZE` /
+`WEAK_TEMPLATE_KEY_SIZE`, `CA_AUDIT_DISABLED` / `CA_AUDIT_UNDERSCOPED`) consume
+already-captured fields; a plain-language **consequences catalogue**
+(`consequences.py`, pure data — no AI) attaches a summary / risk / remediation
+block to every finding in the text and JSON output (envelope `schema_version`
+bumped to 2); `doctor --sarif` emits SARIF v2.1.0 for CI / GRC integration; and
+a threat-model ↔ detector **traceability test** (`test_threat_model_traceability`)
+locks the design spine so no ESC class or hygiene row can drift undetected.
+
 The collector's OS-independent helpers (bit decoders, certutil parsers, IIS
 classifiers) are unit-tested with Pester via `-FunctionsOnly` (CI `collector-helpers`
 job on pwsh); the Windows-only collection paths stay out of scope (WI-009).

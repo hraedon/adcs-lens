@@ -1241,9 +1241,10 @@ def detect_infra_cert_expiry(
                 title="Certificate lifecycle not evaluated",
                 subject="(estate)",
                 detail=(
-                    "The export was ingested without DER cert/CRL parsing. Install "
-                    "the optional extra (pip install adcs-lens[certs]) and re-run to "
-                    "evaluate CA/CRL expiry."
+                    "The export was ingested without DER cert/CRL parsing, so CA/CRL "
+                    "expiry, weak signing algorithm, and CA-cert key-size checks were "
+                    "skipped. Install the optional extra (pip install adcs-lens[certs]) "
+                    "and re-run to evaluate these lifecycle and crypto-hygiene checks."
                 ),
                 source="collector-manifest.json: certs_parsed=false",
             )
@@ -1341,6 +1342,248 @@ def _crl_finding(crl: Crl, now: datetime, warn_days: int) -> list[Finding]:
     return []
 
 
+# The seven certsvc audit bits that make up the Microsoft-recommended full
+# baseline of AuditFilter=127 (0x7F). ``detect_audit_config`` flags a CA as
+# under-scoped if any of these are clear, so the detector stays aligned with the
+# baseline it recommends in its remediation text.
+_AUDIT_CATEGORIES: dict[int, str] = {
+    0x1: "Start/Stop CA",
+    0x2: "Backup/Restore",
+    0x4: "Issue/Cert",
+    0x8: "Revoke",
+    0x10: "Change CA config",
+    0x20: "Change CA security",
+    0x40: "Store/Retrieve cert",
+}
+# The full-baseline value the remediation text recommends. Asserted against the
+# bit set so the two cannot drift apart.
+_AUDIT_FULL_BASELINE = 0x7F
+assert sum(_AUDIT_CATEGORIES) == _AUDIT_FULL_BASELINE
+
+
+def detect_weak_signing(estate: Estate) -> list[Finding]:
+    """Flag CA certificates signed with weak hashing algorithms (SHA-1 / MD5).
+
+    The threat model classifies weak CA signing algorithms as a static hygiene
+    finding. MD5 is treated as CRITICAL and SHA-1 as HIGH; both use the same
+    ``WEAK_SIG_ALG`` identifier so the distinction is carried by severity.
+
+    Matching is by substring on the lower-cased algorithm name. SHA-1 names
+    (``sha1``, ``sha1WithRSAEncryption``, ``ecdsa-with-SHA1``) all carry the
+    ``sha1`` token; no standard hash name (e.g. ``sha256``, ``sha512``) contains
+    it, so the simple check avoids both false positives and false negatives.
+
+    Degrades cleanly: when the export was ingested without DER cert parsing this
+    returns nothing; the ``LIFECYCLE_NOT_EVALUATED`` note from
+    :func:`detect_infra_cert_expiry` already covers the gap.
+    """
+    if not estate.manifest.certs_parsed:
+        return []
+    findings: list[Finding] = []
+    for ca in estate.cas:
+        for cert in ca.certs:
+            alg = cert.sig_alg.lower()
+            if "md5" in alg:
+                severity = Severity.CRITICAL
+                title = "CA certificate signed with MD5"
+            elif "sha1" in alg:
+                severity = Severity.HIGH
+                title = "CA certificate signed with SHA-1"
+            else:
+                continue
+            findings.append(
+                Finding(
+                    check="WEAK_SIG_ALG",
+                    severity=severity,
+                    title=title,
+                    subject=ca.name,
+                    detail=(
+                        f"{ca.name}'s certificate ({cert.subject}) uses the signature "
+                        f"algorithm '{cert.sig_alg}'. Collision-capable hashing weakens the "
+                        "entire chain's integrity. Reissue the certificate using SHA-256 or "
+                        "stronger."
+                    ),
+                    source=f"CA cert for {ca.name}: {cert.subject} sig_alg={cert.sig_alg}",
+                )
+            )
+    return findings
+
+
+def detect_weak_key_size(estate: Estate) -> list[Finding]:
+    """Flag weak RSA key lengths in CA certificates and certificate templates.
+
+    CA certificates and templates both express a minimum key size. CA certs with
+    fewer than 2048 bits are flagged with ``WEAK_KEY_SIZE``; templates that allow
+    below 2048 bits are flagged with ``WEAK_TEMPLATE_KEY_SIZE``. The template
+    check always runs regardless of whether DER certs were parsed.
+
+    Only RSA keys are subject to the 2048-bit baseline — ECDSA keys legitimately
+    use 256/384/521-bit sizes, so non-RSA CA certs are skipped.
+
+    The template half applies the same 2048-bit RSA baseline to every template's
+    ``msPKI-Minimal-Key-Size``. That attribute is RSA-oriented; a template
+    configured for ECDSA-only enrollment may legitimately carry a smaller minimum
+    and would surface here for manual review until the collector captures the
+    template CSP/algorithm (tracked as a model gap).
+
+    Degrades cleanly: the CA certificate half returns nothing when
+    ``certs_parsed`` is False, mirroring other lifecycle detectors.
+    """
+    findings: list[Finding] = []
+
+    if estate.manifest.certs_parsed:
+        for ca in estate.cas:
+            for cert in ca.certs:
+                bits = cert.key_bits
+                if bits is None or bits >= 2048:
+                    continue
+                if cert.key_alg != "rsa":
+                    continue
+                if bits < 1024:
+                    severity = Severity.CRITICAL
+                    title = f"CA certificate uses a {bits}-bit key"
+                elif bits == 1024:
+                    severity = Severity.HIGH
+                    title = "CA certificate uses a 1024-bit key"
+                else:
+                    severity = Severity.MEDIUM
+                    title = f"CA certificate uses a {bits}-bit key"
+                findings.append(
+                    Finding(
+                        check="WEAK_KEY_SIZE",
+                        severity=severity,
+                        title=title,
+                        subject=ca.name,
+                        detail=(
+                            f"{ca.name}'s certificate ({cert.subject}) uses a {bits}-bit "
+                            "key, below the 2048-bit baseline. RSA keys below 2048 bits are "
+                            "increasingly factorable. Reissue the certificate with a 2048-bit "
+                            "or larger key."
+                        ),
+                        source=f"CA cert for {ca.name}: {cert.subject} key_bits={bits}",
+                    )
+                )
+
+    for tmpl in estate.templates:
+        bits = tmpl.min_key_size
+        if bits is None or bits >= 2048:
+            continue
+        if bits < 1024:
+            severity = Severity.HIGH
+            title = f"Template allows a {bits}-bit key"
+        elif bits == 1024:
+            severity = Severity.MEDIUM
+            title = "Template allows a 1024-bit key"
+        else:
+            severity = Severity.MEDIUM
+            title = f"Template allows a {bits}-bit key"
+        findings.append(
+            Finding(
+                check="WEAK_TEMPLATE_KEY_SIZE",
+                severity=severity,
+                title=title,
+                subject=tmpl.display_name or tmpl.name,
+                detail=(
+                    f"Template '{tmpl.name}' permits a minimum key size of {bits} bits, "
+                    "below the 2048-bit policy baseline. Certificates issued with weak keys "
+                    "can be broken. Set msPKI-Minimal-Key-Size to 2048 or higher."
+                ),
+                source=f"template '{tmpl.name}': msPKI-Minimal-Key-Size={bits}",
+            )
+        )
+
+    return findings
+
+
+def detect_audit_config(estate: Estate) -> list[Finding]:
+    """Flag CAs whose audit configuration is disabled or missing event categories.
+
+    A fully configured CA logs every certsvc audit category — the Microsoft
+    recommended full baseline is AuditFilter=127 (0x7F). An AuditFilter of 0
+    means auditing is fully disabled; any value that does not include all seven
+    baseline bits (0x1-0x40) is flagged as under-scoped, naming the missing
+    categories.
+
+    Degrades cleanly: when no CA in the export carries an AuditFilter value this
+    emits a single estate-level INFO note; when *some* CAs lack a value while
+    others have one, each unevaluated CA gets its own INFO note so the gap is
+    never silently dropped alongside real findings.
+    """
+    if not estate.cas or all(ca.audit_filter is None for ca in estate.cas):
+        return [
+            Finding(
+                check="CA_AUDIT_NOT_EVALUATED",
+                severity=Severity.INFO,
+                title="CA audit configuration not evaluated",
+                subject="(estate)",
+                detail=(
+                    "The export did not include CA AuditFilter values, so CA audit "
+                    "configuration could not be evaluated. Re-run a collector that captures "
+                    "certutil -getreg CA\\AuditFilter."
+                ),
+                source="collector-manifest.json: CA AuditFilter not captured",
+            )
+        ]
+
+    findings: list[Finding] = []
+    for ca in estate.cas:
+        if ca.audit_filter is None:
+            findings.append(
+                Finding(
+                    check="CA_AUDIT_NOT_EVALUATED",
+                    severity=Severity.INFO,
+                    title=f"CA audit configuration not evaluated for {ca.name}",
+                    subject=ca.name,
+                    detail=(
+                        f"{ca.name} has no AuditFilter value in the export, so its audit "
+                        "configuration could not be evaluated. Re-run a collector that captures "
+                        f"certutil -getreg CA\\AuditFilter for {ca.name}."
+                    ),
+                    source=f"{ca.config_string or ca.name}: CA\\AuditFilter not captured",
+                )
+            )
+            continue
+        if ca.audit_filter == 0:
+            findings.append(
+                Finding(
+                    check="CA_AUDIT_DISABLED",
+                    severity=Severity.CRITICAL,
+                    title="CA auditing is fully disabled",
+                    subject=ca.name,
+                    detail=(
+                        f"{ca.name} has AuditFilter=0, so no CA events are written to the "
+                        "security log. This removes the audit trail needed to detect or "
+                        "investigate misuse. Enable the full audit baseline: certutil -setreg "
+                        "CA\\AuditFilter 127, then restart certsvc."
+                    ),
+                    source=f"{ca.config_string or ca.name}: CA\\AuditFilter=0",
+                )
+            )
+            continue
+
+        missing = [name for bit, name in _AUDIT_CATEGORIES.items() if not (ca.audit_filter & bit)]
+        if missing:
+            missing_text = ", ".join(missing)
+            findings.append(
+                Finding(
+                    check="CA_AUDIT_UNDERSCOPED",
+                    severity=Severity.MEDIUM,
+                    title="CA audit filter is missing event categories",
+                    subject=ca.name,
+                    detail=(
+                        f"{ca.name} has AuditFilter={ca.audit_filter} (0x{ca.audit_filter:X}), "
+                        f"which does not include the full 127 (0x7F) baseline: missing "
+                        f"{missing_text}. Missing event categories hide CA administration and "
+                        "certificate lifecycle activity. Enable the full audit baseline: "
+                        "certutil -setreg CA\\AuditFilter 127, then restart certsvc."
+                    ),
+                    source=f"{ca.config_string or ca.name}: CA\\AuditFilter={ca.audit_filter}",
+                )
+            )
+
+    return findings
+
+
 def run_all(
     estate: Estate,
     *,
@@ -1365,6 +1608,9 @@ def run_all(
         *detect_esc13(estate),
         *detect_esc15(estate),
         *detect_infra_cert_expiry(estate, now=now, warn_days=warn_days),
+        *detect_weak_signing(estate),
+        *detect_weak_key_size(estate),
+        *detect_audit_config(estate),
     ]
     findings.sort(key=lambda f: (SEVERITY_RANK[f.severity], f.check, f.subject))
     return findings
