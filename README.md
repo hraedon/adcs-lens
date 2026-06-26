@@ -104,6 +104,7 @@ adcs-lens ingest C:\AdcsExport
 adcs-lens doctor C:\AdcsExport            # prioritized posture + lifecycle findings
 adcs-lens doctor C:\AdcsExport --json     # stable JSON envelope (with consequences)
 adcs-lens doctor C:\AdcsExport --sarif    # SARIF v2.1.0 for CI / GRC integration
+adcs-lens doctor C:\AdcsExport --html     # self-contained HTML evidence report
 adcs-lens diff  OLD\Export NEW\Export     # Stance 2: what got worse / better since the baseline
 adcs-lens diff  OLD NEW --exit-code       # non-zero on regressions (for scheduled scans)
 ```
@@ -116,8 +117,8 @@ adcs-lens diff  OLD NEW --exit-code       # non-zero on regressions (for schedul
 > `CA_AUDIT_DISABLED` / `CA_AUDIT_UNDERSCOPED`). Per-template ACL-gap detection
 > (`TEMPLATE_ACL_UNREADABLE`) is also built. Every finding carries a
 > plain-language **consequences** entry (summary, risk, remediation) in the text
-> and JSON output, and `doctor --sarif` emits SARIF v2.1.0 for CI / GRC
-> integration.
+> and JSON output, `doctor --sarif` emits SARIF v2.1.0 for CI / GRC integration,
+> and `doctor --html` emits a self-contained, deterministic HTML evidence report.
 > The read-only PowerShell **collector** (`scripts/Export-AdcsEstate.ps1`) is
 > built and validated end-to-end against a live enterprise CA — including the
 > PKI-object ACL pass (NTAuth / AIA / CDP / PKS containers + CA objects) that

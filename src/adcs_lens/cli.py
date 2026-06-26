@@ -1,7 +1,7 @@
 """Command-line front door. Stdlib ``argparse`` only.
 
     adcs-lens ingest <export-dir>            # parse + summarize an export
-    adcs-lens doctor <export-dir> [--json|--sarif]   # prioritized posture + lifecycle
+    adcs-lens doctor <export-dir> [--json|--sarif|--html]   # prioritized posture + lifecycle
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from adcs_lens.diff import diff_findings
 from adcs_lens.display import (
     render_diff_json,
     render_diff_text,
+    render_html,
     render_json,
     render_sarif,
     render_text,
@@ -44,6 +45,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--sarif",
         action="store_true",
         help="Emit SARIF v2.1.0 output for CI / GRC integration.",
+    )
+    fmt.add_argument(
+        "--html",
+        action="store_true",
+        help="Emit a self-contained HTML evidence report.",
     )
     p_doctor.add_argument(
         "--warn-days",
@@ -108,6 +114,7 @@ def _cmd_doctor(
     *,
     as_json: bool,
     as_sarif: bool,
+    as_html: bool,
     warn_days: int,
     severity: str,
     exit_code: bool,
@@ -120,6 +127,8 @@ def _cmd_doctor(
 
     if as_sarif:
         print(render_sarif(findings))
+    elif as_html:
+        print(render_html(findings))
     elif as_json:
         print(render_json(findings))
     else:
@@ -165,6 +174,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.export_dir,
                 as_json=args.json,
                 as_sarif=args.sarif,
+                as_html=args.html,
                 warn_days=args.warn_days,
                 severity=args.severity,
                 exit_code=args.exit_code,
