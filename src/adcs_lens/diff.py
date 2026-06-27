@@ -7,7 +7,9 @@ findings), and severity changes on the same issue. This is the air-gap-preservin
 
 A finding's drift identity is ``(check, subject)`` — the same check on the same CA
 / template / object. A severity change on that pair is a "changed" finding, not a
-new-and-resolved pair.
+new-and-resolved pair. Content changes (different title, detail, or source) with
+an unchanged severity are also reported as "changed" but do not count as
+regressions.
 """
 
 from __future__ import annotations
@@ -28,7 +30,12 @@ def _worst_first(findings: list[Finding]) -> list[Finding]:
 
 @dataclass(frozen=True)
 class FindingDelta:
-    """A finding whose severity changed between snapshots (same check + subject)."""
+    """A finding that drifted between snapshots (same check + subject).
+
+    The change can be a severity shift, a content shift (title/detail/source),
+    or both. ``content_changed`` is true only when severity stayed the same but
+    the explanatory fields changed.
+    """
 
     old: Finding
     new: Finding
@@ -38,6 +45,21 @@ class FindingDelta:
         # Lower rank == worse, so a smaller rank in `new` means it got worse.
         return SEVERITY_RANK[self.new.severity] < SEVERITY_RANK[self.old.severity]
 
+    @property
+    def content_changed(self) -> bool:
+        """True when severity is unchanged but title, detail, or source differ."""
+        if self.old.severity != self.new.severity:
+            return False
+        return (
+            self.old.title,
+            self.old.detail,
+            self.old.source,
+        ) != (
+            self.new.title,
+            self.new.detail,
+            self.new.source,
+        )
+
 
 @dataclass(frozen=True)
 class DriftReport:
@@ -45,12 +67,16 @@ class DriftReport:
 
     new: tuple[Finding, ...]  # regressions: present now, absent before
     resolved: tuple[Finding, ...]  # fixes: present before, absent now
-    changed: tuple[FindingDelta, ...]  # same (check, subject), different severity
+    changed: tuple[FindingDelta, ...]  # same (check, subject), different severity or content
     unchanged: int  # count of findings identical across both
 
     @property
     def regressions(self) -> bool:
-        """True when something got worse — a new finding or a worsened severity."""
+        """True when posture got worse: a new finding or a worsened severity.
+
+        Content-only changes (same severity, changed detail/title/source) are
+        reported in ``changed`` but do not make this True.
+        """
         return bool(self.new) or any(d.worsened for d in self.changed)
 
 
@@ -67,8 +93,13 @@ def diff_findings(old: list[Finding], new: list[Finding]) -> DriftReport:
         of = old_by.get(k)
         if of is None:
             continue
-        if of.severity != nf.severity:
-            changed.append(FindingDelta(old=of, new=nf))
+        delta = FindingDelta(old=of, new=nf)
+        # Any severity difference (worse or better) is a change; otherwise a
+        # content change (same severity, different title/detail/source) is.
+        # content_changed is False when severity differs, so the disjunction is
+        # exact and the tuple comparison lives in one place.
+        if of.severity != nf.severity or delta.content_changed:
+            changed.append(delta)
         else:
             unchanged += 1
 

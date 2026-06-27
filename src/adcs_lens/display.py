@@ -104,6 +104,7 @@ def render_diff_json(report: DriftReport) -> str:
                 "old_severity": d.old.severity.value,
                 "new_severity": d.new.severity.value,
                 "worsened": d.worsened,
+                "content_changed": d.content_changed,
             }
             for d in report.changed
         ],
@@ -129,7 +130,12 @@ def render_diff_text(report: DriftReport) -> str:
             lines.append(f"  in plain terms: {entry.summary} {entry.consequence}")
             lines.append(f"  how to fix: {entry.remediation}")
     for d in report.changed:
-        arrow = "worse" if d.worsened else "better"
+        if d.worsened:
+            arrow = "worse"
+        elif d.old.severity != d.new.severity:
+            arrow = "better"
+        else:
+            arrow = "changed"
         lines.append(
             f"\n[~ {arrow.upper()}] {d.new.check}  {d.new.subject}: "
             f"{d.old.severity.value} -> {d.new.severity.value}"

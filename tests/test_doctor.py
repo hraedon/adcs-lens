@@ -82,6 +82,31 @@ def test_doctor_exit_code_clean_when_nothing_meets_threshold(
     capsys.readouterr()
 
 
+def test_doctor_exit_code_clean_with_only_degradation_note(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Default severity floor includes INFO. An empty export emits only
+    # CA_AUDIT_NOT_EVALUATED, which must be shown but must not trip the
+    # --exit-code gate.
+    rc = main(["doctor", str(tmp_path), "--exit-code"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "CA_AUDIT_NOT_EVALUATED" in out
+
+
+def test_degradation_note_shown_in_json_but_not_gated(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The "shown but not gated" contract (WI-030) must hold for --json too,
+    # the format a CI pipeline most likely consumes: the coverage-gap note is
+    # present in the findings array while --exit-code stays zero.
+    rc = main(["doctor", str(tmp_path), "--json", "--exit-code"])
+    assert rc == 0
+    envelope = json.loads(capsys.readouterr().out)
+    checks = {f["check"] for f in envelope["findings"]}
+    assert "CA_AUDIT_NOT_EVALUATED" in checks
+
+
 def test_doctor_exit_code_without_flag_stays_zero(json_export: Path) -> None:
     # Findings exist, but absent --exit-code the command still reports success.
     assert main(["doctor", str(json_export)]) == 0

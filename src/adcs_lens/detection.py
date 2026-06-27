@@ -207,6 +207,25 @@ _NTLM_PROVIDERS = frozenset({"ntlm", "negotiate"})
 # different (challenge-based) flow, so it is collected but not flagged here.
 _ESC8_KINDS = frozenset({EndpointKind.WEB_ENROLLMENT, EndpointKind.CES})
 
+# Coverage-gap note identifiers. These INFO findings signal a detector was skipped
+# because the export lacks a required pass, not a posture weakness, so they are
+# excluded from the --exit-code gate while still being shown in the output.
+_DEGRADATION_NOTES: frozenset[str] = frozenset(
+    {
+        "ALTSECID_NOT_EVALUATED",
+        "CA_AUDIT_NOT_EVALUATED",
+        "CA_SECURITY_NOT_EVALUATED",
+        "DC_REGISTRY_NOT_EVALUATED",
+        "ENROLLMENT_ENDPOINTS_NOT_EVALUATED",
+        "ESC10_ENFORCEMENT_UNKNOWN",
+        "ESC14_ENFORCEMENT_UNKNOWN",
+        "LIFECYCLE_NOT_EVALUATED",
+        "PKI_ACL_NOT_EVALUATED",
+        "TEMPLATE_ACL_NOT_EVALUATED",
+        "TEMPLATE_ACL_UNREADABLE",
+    }
+)
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -219,6 +238,11 @@ class Finding:
     detail: str
     source: str  # the exact source fact (registry path, cert file, CRL, ...)
     tier: CrlTier | None = None  # root | issuing for lifecycle findings
+
+
+def is_degradation_note(finding: Finding) -> bool:
+    """True when a finding is a coverage-gap note rather than a posture finding."""
+    return finding.check in _DEGRADATION_NOTES
 
 
 def detect_esc6(estate: Estate) -> list[Finding]:

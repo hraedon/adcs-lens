@@ -10,9 +10,10 @@ import argparse
 import json
 import sys
 from collections.abc import Sequence
+from datetime import UTC, datetime
 
 from adcs_lens import __version__
-from adcs_lens.detection import run_all
+from adcs_lens.detection import is_degradation_note, run_all
 from adcs_lens.diff import diff_findings
 from adcs_lens.display import (
     render_diff_json,
@@ -84,7 +85,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_diff.add_argument(
         "--exit-code",
         action="store_true",
-        help="Exit non-zero when there are regressions (new or worsened findings).",
+        help="Exit non-zero when there are regressions (new or worsened findings). "
+        "Content-only changes are reported but do not trip the gate.",
     )
     return parser
 
@@ -134,8 +136,9 @@ def _cmd_doctor(
     else:
         print(render_text(findings))
 
-    # `findings` is already filtered to the threshold, so any survivor trips the gate.
-    if exit_code and findings:
+    # Coverage-gap notes (e.g. LIFECYCLE_NOT_EVALUATED) meet the threshold but are
+    # not posture findings, so they do not trip the --exit-code gate.
+    if exit_code and any(not is_degradation_note(f) for f in findings):
         return 1
     return 0
 
@@ -148,8 +151,12 @@ def _cmd_diff(
     warn_days: int,
     exit_code: bool,
 ) -> int:
-    old = run_all(ingest(old_export), warn_days=warn_days)
-    new = run_all(ingest(new_export), warn_days=warn_days)
+    # A single comparison instant keeps cert-expiry "days remaining" titles
+    # stable across the two snapshots (a midnight-UTC straddle would otherwise
+    # false-flag a content change under WI-028).
+    now = datetime.now(UTC)
+    old = run_all(ingest(old_export), now=now, warn_days=warn_days)
+    new = run_all(ingest(new_export), now=now, warn_days=warn_days)
     report = diff_findings(old, new)
 
     print(render_diff_json(report) if as_json else render_diff_text(report))

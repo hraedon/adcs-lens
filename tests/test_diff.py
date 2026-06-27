@@ -10,6 +10,7 @@ import pytest
 from adcs_lens.cli import main
 from adcs_lens.detection import Finding
 from adcs_lens.diff import diff_findings
+from adcs_lens.display import render_diff_json, render_diff_text
 from adcs_lens.model import Severity
 
 
@@ -149,3 +150,76 @@ def test_cli_diff_text_new_finding_shows_plain_terms(
     out = capsys.readouterr().out
     assert "in plain terms:" in out
     assert "how to fix:" in out
+
+
+def test_diff_detects_content_change_same_severity() -> None:
+    old = [_f("ESC1", "TemplA")]
+    new = [
+        Finding(
+            check="ESC1",
+            severity=Severity.HIGH,
+            title="ESC1 on TemplA",
+            subject="TemplA",
+            detail="new detail",
+            source="s",
+        )
+    ]
+    report = diff_findings(old, new)
+    assert len(report.changed) == 1
+    delta = report.changed[0]
+    assert delta.worsened is False
+    assert delta.content_changed is True
+    assert report.regressions is False
+    assert report.unchanged == 0
+
+
+def test_diff_identical_content_is_unchanged() -> None:
+    old = [_f("ESC1", "TemplA")]
+    new = [_f("ESC1", "TemplA")]
+    report = diff_findings(old, new)
+    assert report.changed == ()
+    assert report.unchanged == 1
+    assert report.regressions is False
+
+
+def test_content_change_does_not_trip_diff_exit_code(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    report = diff_findings(
+        old=[_f("ESC1", "TemplA", Severity.HIGH)],
+        new=[Finding(
+            check="ESC1",
+            severity=Severity.HIGH,
+            title="ESC1 on TemplA",
+            subject="TemplA",
+            detail="wider enroller set",
+            source="s",
+        )],
+    )
+    assert report.regressions is False
+    out = render_diff_text(report)
+    assert "[~ CHANGED]" in out
+
+
+def test_diff_json_emits_content_changed_field() -> None:
+    # The --json diff envelope must surface content-only changes with a
+    # content_changed flag so a CI consumer can distinguish them from
+    # severity changes (WI-028).
+    report = diff_findings(
+        old=[_f("ESC1", "TemplA", Severity.HIGH)],
+        new=[
+            Finding(
+                check="ESC1",
+                severity=Severity.HIGH,
+                title="ESC1 on TemplA",
+                subject="TemplA",
+                detail="changed detail",
+                source="s",
+            )
+        ],
+    )
+    env = json.loads(render_diff_json(report))
+    assert len(env["changed"]) == 1
+    entry = env["changed"][0]
+    assert entry["worsened"] is False
+    assert entry["content_changed"] is True

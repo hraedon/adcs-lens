@@ -142,7 +142,7 @@ adcs-lens diff  OLD NEW --exit-code       # non-zero on regressions (for schedul
 Core built (Plan 001 Phases 0, 1, 2, 3) with ESC1/2/3/4/5/6/7/8/9/10/11/13/14/15
 detectors, infrastructure cert/CRL-expiry checks, and crypto/operational hygiene
 detectors (weak signing algorithm, weak CA/template key size, CA audit
-configuration) — the full ESC family and statically-detectable hygiene rows the
+configuration) — the statically-detectable ESC family (ESC12 has no established static prerequisite; ESC16 is statically detectable but not yet implemented — see `docs/threat-model.md`) and statically-detectable hygiene rows the
 threat model marks. The collector — including the opt-in ESC10/ESC14 DC
 certificate-mapping passes — is validated against the live lab. Remaining: a live
 *positive* (vulnerable-config) validation for the newer detectors (ESC10/11/13/14

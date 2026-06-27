@@ -32,10 +32,28 @@ HYGIENE_STATUS: dict[str, str | None] = {
 }
 
 
-def _esc_ids_in_threat_model() -> set[str]:
-    """Extract ESC identifiers from the threat model's ESC catalogue table."""
+def _esc_rows_in_threat_model() -> list[tuple[str, str]]:
+    """Return ``(esc_id, detectability)`` pairs from the catalogue table.
+
+    The detectability cell is the third column. ``Static`` and
+    ``Static (enabling config)`` verdicts must have a detector; ``Out`` and
+    ``Out (unresolved)`` verdicts must not. This is what closes the gap that let
+    ESC12 sit silently absent: every ESC number in the range must appear with a
+    verdict, and only static verdicts require a detector.
+    """
     text = _THREAT_MODEL.read_text(encoding="utf-8")
-    return set(re.findall(r"^\|\s*(ESC\d+)\s*\|", text, re.MULTILINE))
+    # Stop at the hygiene section so we only parse the ESC catalogue table.
+    section = text.split("## Non-ESC hygiene & lifecycle")[0]
+    rows: list[tuple[str, str]] = []
+    for line in section.splitlines():
+        m = re.match(r"^\|\s*(ESC\d+)\s*\|(.*)$", line)
+        if not m:
+            continue
+        cells = m.group(2).split("|")
+        # cells[0] is "What it is", cells[1] is "Detectability".
+        detectability = cells[1].strip() if len(cells) > 1 else ""
+        rows.append((m.group(1), detectability))
+    return rows
 
 
 def _esc_detectors() -> set[str]:
@@ -108,14 +126,96 @@ def _check_literals_in_detection() -> set[str]:
     return emitted
 
 
+def _info_check_literals_in_detection() -> set[str]:
+    """Every check id passed to a ``Finding`` whose severity is ``Severity.INFO``.
+
+    Used to lock the ``_DEGRADATION_NOTES`` set (WI-030): an INFO-severity
+    finding is, by project convention, a coverage-gap note excluded from the
+    ``--exit-code`` gate. If a new INFO degrade note ships without being added
+    to that set, the gate silently re-trips on clean estates.
+    """
+    tree = ast.parse(_DETECTION_SRC.read_text(encoding="utf-8"))
+    emitted: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Name) and func.id == "Finding"):
+            continue
+        check = None
+        is_info = False
+        for kw in node.keywords:
+            if kw.arg == "check" and isinstance(kw.value, ast.Constant):
+                check = kw.value.value
+            if kw.arg == "severity" and isinstance(kw.value, ast.Attribute):
+                is_info = kw.value.attr == "INFO"
+        if check is not None and is_info:
+            emitted.add(check)
+    return emitted
+
+
+def _verdict_of(detectability: str) -> str:
+    """Extract the bolded verdict token from a detectability cell.
+
+    e.g. '**Static (enabling config)** -- ...' -> 'Static (enabling config)'.
+    """
+    m = re.match(r"^\*\*(.+?)\*\*", detectability)
+    return m.group(1) if m else detectability
+
+
+# Verdicts that require a detector (the condition is statically readable AND
+# the detector is built). Everything else (Out, Out (unresolved),
+# Static (not yet implemented)) is exempt.
+_IMPLEMENTED_VERDICTS: frozenset[str] = frozenset(
+    {"Static", "Static (enabling config)"}
+)
+
+
 def test_esc_threat_model_matches_detectors() -> None:
-    """Every ESC class in the threat model has a detector, and vice versa."""
-    tm = _esc_ids_in_threat_model()
+    """Every implemented ESC class has a detector, and vice versa.
+
+    Only ``Static`` / ``Static (enabling config)`` verdicts require a detector;
+    ``Out``, ``Out (unresolved)``, and ``Static (not yet implemented)`` are
+    exempt. This is what lets ESC12 be documented as unresolved and ESC16 as
+    not-yet-implemented without forcing stub detectors, while still keeping the
+    catalogue honest: every row must carry a recognized verdict.
+    """
+    rows = _esc_rows_in_threat_model()
+    row_ids = {esc for esc, _ in rows}
+    implemented_ids = {esc for esc, det in rows if _verdict_of(det) in _IMPLEMENTED_VERDICTS}
+    deferred_ids = {esc for esc, det in rows if _verdict_of(det) not in _IMPLEMENTED_VERDICTS}
+    assert implemented_ids | deferred_ids == row_ids, (
+        "ESC rows with an unrecognized verdict: "
+        f"{sorted(row_ids - (implemented_ids | deferred_ids))}"
+    )
     det = _esc_detectors()
-    assert tm == det, (
-        "ESC threat-model / detector mismatch:\n"
-        f"  in threat model but no detector: {sorted(tm - det)}\n"
-        f"  has detector but not in threat model: {sorted(det - tm)}"
+    missing_detectors = implemented_ids - det
+    stray_detectors = det - implemented_ids
+    assert not missing_detectors, (
+        "ESC threat-model rows marked Static (implemented) but no detector:\n"
+        f"  {sorted(missing_detectors)}"
+    )
+    assert not stray_detectors, (
+        "detectors exist for ESC classes not marked Static (implemented):\n"
+        f"  {sorted(stray_detectors)}"
+    )
+
+
+def test_esc_catalogue_has_no_silent_gaps() -> None:
+    """The ESC catalogue accounts for a contiguous range with no missing numbers.
+
+    This is the guard that would have caught ESC12's silent absence: a number
+    can be skipped only if it appears with an explicit ``Out``/``Out
+    (unresolved)`` verdict, never by simple omission. ESC numbering is
+    1-based and contiguous from 1 to the highest declared number.
+    """
+    rows = _esc_rows_in_threat_model()
+    numbers = sorted(int(esc[3:]) for esc, _ in rows)
+    assert numbers, "no ESC rows found in the threat model"
+    expected = list(range(1, numbers[-1] + 1))
+    assert numbers == expected, (
+        "ESC catalogue is not contiguous; missing numbers must be added with an "
+        f"explicit Out verdict (or implemented): missing {sorted(set(expected) - set(numbers))}"
     )
 
 
@@ -156,3 +256,25 @@ def test_hygiene_status_matches_detector_emissions() -> None:
             assert check in emitted, (
                 f"hygiene row {row!r} maps to {check!r} but no detector emits it"
             )
+
+
+def test_degradation_notes_set_stays_in_sync() -> None:
+    """Every INFO-severity check literal is a registered degradation note.
+
+    WI-030 excludes ``_DEGRADATION_NOTES`` from the ``--exit-code`` gate. By
+    project convention INFO severity marks only coverage-gap notes (a skipped
+    collector pass), never a real posture finding. If a future detector adds
+    an INFO degrade note without registering it in the set, the note would
+    silently re-trip the CI gate on a clean estate — the exact bug WI-030 fixed.
+    Mirrors the consequences-catalogue AST guard.
+    """
+    from adcs_lens.detection import _DEGRADATION_NOTES
+
+    info_checks = _info_check_literals_in_detection()
+    assert info_checks == _DEGRADATION_NOTES, (
+        "INFO-severity check literals and _DEGRADATION_NOTES drifted:\n"
+        f"  emitted INFO checks not in the set (would re-trip --exit-code): "
+        f"{sorted(info_checks - _DEGRADATION_NOTES)}\n"
+        f"  in the set but not emitted (stale entry): "
+        f"{sorted(_DEGRADATION_NOTES - info_checks)}"
+    )

@@ -14,6 +14,15 @@ The detectability column *is* the "flag, don't probe" principle made concrete:
   adcs-lens flags the prerequisite and says so; it never confirms by probing.
 - **Out** — detection inherently requires authenticating, enrolling, relaying,
   or otherwise acting against live AD CS. Explicitly out of scope.
+- **Out (unresolved)** — no statically-detectable enabling configuration has
+  been identified in canonical tooling (e.g. Certipy's enumeration engine) or
+  published research. The ESC number is preserved for catalogue continuity but
+  the class is not classified. Not silently omitted — every ESC number in the
+  catalogue is accounted for, enforced by the traceability test.
+- **Static (not yet implemented)** — the enabling condition is statically
+  readable, but no detector is built yet (and the collector may not capture the
+  field). Listed so the catalogue stays honest rather than silently omitting a
+  detectable class; tracked as a work item.
 
 ## ESC catalogue
 
@@ -30,9 +39,11 @@ The detectability column *is* the "flag, don't probe" principle made concrete:
 | ESC9 | `CT_FLAG_NO_SECURITY_EXTENSION` on template (weak mapping) | **Static** | template `msPKI-Enrollment-Flag` |
 | ESC10 | Weak certificate mappings on DCs (`StrongCertificateBindingEnforcement` / `CertificateMappingMethods`) | **Static** (needs DC registry in export) | DC registry export |
 | ESC11 | `IF_ENFORCEENCRYPTICERTREQUEST` off → RPC (ICertPassage) relay | **Static (enabling config)** — flag the flag; relay is **Out** | CA registry `InterfaceFlags` (`certutil -getreg`) |
+| ESC12 | *Unresolved* — no statically-detectable enabling configuration has been identified in canonical tooling or published research; the ESC number is preserved for continuity. Tracked as WI-026. | **Out (unresolved)** | n/a |
 | ESC13 | Issuance-policy OID linked to a privileged group | **Static** | template `msPKI-Certificate-Policy` + `msDS-OIDToGroupLink` on the OID object |
 | ESC14 | Weak explicit cert mapping via `altSecurityIdentities` | **Static** (needs AD object read in export) | AD principal `altSecurityIdentities` |
 | ESC15 | EKUwu (CVE-2024-49019): v1 template + application policies in request | **Static (enabling config)** — flag vulnerable v1 templates + CA patch state; request-side is **Out** | template schema version + name flags; CA build/patch level |
+| ESC16 | CA-wide disable of the security extension (`disabled_extensions` contains `1.3.6.1.4.1.311.25.2`) — the CA-level analogue of ESC9 | **Static (not yet implemented)** | CA `disabled_extensions` (tracked as WI-036) |
 
 ## Non-ESC hygiene & lifecycle
 
