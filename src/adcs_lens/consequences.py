@@ -241,7 +241,8 @@ CONSEQUENCES: dict[str, ConsequenceEntry] = {
         ),
         remediation=(
             "Remove szOID_NTDS_CA_SECURITY_EXT from the CA's DisableExtensionList policy "
-            "setting and restart the certificate service."
+            "setting and restart the certificate service, unless the CA intentionally "
+            "issues certificates for a non-AD mapping scenario."
         ),
     ),
     "CA_CERT_EXPIRY": ConsequenceEntry(

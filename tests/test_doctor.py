@@ -23,6 +23,9 @@ def test_doctor_json_flags_esc6(json_export: Path, capsys: pytest.CaptureFixture
     assert "ESC9" in checks
     # The fixture grants Domain Users Manage Certificates on the issuing CA -> ESC7.
     assert "ESC7" in checks
+    # The fixture issuing CA has szOID_NTDS_CA_SECURITY_EXT in DisableExtensionList
+    # -> ESC16 surfaces end-to-end (ingest -> field -> detector).
+    assert "ESC16" in checks
     esc6 = next(f for f in envelope["findings"] if f["check"] == "ESC6")
     assert esc6["severity"] == Severity.CRITICAL.value
     assert isinstance(esc6["consequence"], dict)

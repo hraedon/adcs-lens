@@ -81,6 +81,21 @@ Describe '_parseCertutilMultiSzLines' {
         )
         (_parseCertutilMultiSzLines $lines) | Should -Be @('1.3.6.1.4.1.311.25.2')
     }
+    It 'captures multiple same-line values after =' {
+        $lines = @(
+            '  DisableExtensionList REG_MULTI_SZ = 1.3.6.1.4.1.311.25.2 2.5.29.14',
+            'CertUtil: -getreg command completed successfully.'
+        )
+        (_parseCertutilMultiSzLines $lines) | Should -Be @('1.3.6.1.4.1.311.25.2', '2.5.29.14')
+    }
+    It 'collects continuation values when the marker line is empty' {
+        $lines = @(
+            '  DisableExtensionList REG_MULTI_SZ =',
+            '    1.3.6.1.4.1.311.25.2',
+            'CertUtil: -getreg command completed successfully.'
+        )
+        (_parseCertutilMultiSzLines $lines) | Should -Be @('1.3.6.1.4.1.311.25.2')
+    }
     It 'returns empty when the value is absent' {
         $lines = @('CertUtil: -getreg command completed successfully.')
         ((_parseCertutilMultiSzLines $lines) -join ',') | Should -Be ''

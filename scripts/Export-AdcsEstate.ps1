@@ -134,14 +134,17 @@ function _parseCertutilDwordLines($lines) {
 }
 # Parse certutil -getreg REG_MULTI_SZ output (e.g. policy\DisableExtensionList -> ESC16).
 # certutil prints the value name + 'REG_MULTI_SZ' then each string on its own indented
-# line; a first value may also follow '=' on the marker line. Returns the bare strings.
+# line; a first value may also follow '=' on the marker line. Captures OID-style tokens
+# (no internal spaces); sufficient for DisableExtensionList, whose values are bare OIDs.
 function _parseCertutilMultiSzLines($lines) {
   $out = @()
   $inMulti = $false
   foreach ($line in $lines) {
     if ($line -match 'REG_MULTI_SZ') {
       $inMulti = $true
-      if ($line -match '=\s*(\S+)') { $out += $Matches[1] }
+      if ($line -match '=\s*(.+)$') {
+        foreach ($tok in ($Matches[1] -split '\s+')) { if ($tok) { $out += $tok } }
+      }
       continue
     }
     if ($inMulti) {

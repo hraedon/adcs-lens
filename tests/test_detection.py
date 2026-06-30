@@ -548,6 +548,17 @@ def test_esc16_flags_each_vulnerable_ca() -> None:
     assert len(detect_esc16(_estate(cas=two))) == 2
 
 
+def test_esc16_skips_root_ca() -> None:
+    # An offline root does not issue AD-auth end-entity certs, so the SID
+    # extension is irrelevant there — mirroring ESC11's root exclusion.
+    root = _ca(
+        "RootCA",
+        kind=CaKind.ROOT,
+        disabled_extensions=("1.3.6.1.4.1.311.25.2",),
+    )
+    assert detect_esc16(_estate(cas=(root,))) == []
+
+
 # --- ESC10 -----------------------------------------------------------------
 
 

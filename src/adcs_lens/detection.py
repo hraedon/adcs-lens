@@ -813,9 +813,18 @@ def detect_esc16(estate: Estate) -> list[Finding]:
     account. We flag the enabling CA configuration; the mapping/relay itself is
     out of scope. Readable from the CA policy registry with no ACL dependency, so
     it evaluates on every export (unlike ESC1).
+
+    Root CAs are excluded (mirroring ESC11): an offline root does not issue
+    AD-authentication end-entity certificates, so the SID extension is irrelevant
+    there and flagging it would be a false positive. Severity is HIGH (not
+    CRITICAL) because, like ESC9/ESC11, exploitation requires an external
+    precondition (weak DC binding enforcement) — it is an enabling
+    configuration, not a direct primitive like ESC6.
     """
     findings: list[Finding] = []
     for ca in estate.cas:
+        if ca.kind is CaKind.ROOT:
+            continue
         if _NTDS_CA_SECURITY_EXT in ca.disabled_extensions:
             findings.append(
                 Finding(
@@ -828,7 +837,9 @@ def detect_esc16(estate: Estate) -> list[Finding]:
                         "so every issued certificate omits the SID security extension. Where "
                         "DC StrongCertificateBindingEnforcement is not enforcing, a certificate "
                         "can be mapped to another account. Remove the OID from "
-                        "policy\\DisableExtensionList, then restart certsvc."
+                        "policy\\DisableExtensionList (re-set the multi-string without it via "
+                        "certutil -setreg or the registry editor), then restart certsvc — unless "
+                        "the CA intentionally issues certificates for a non-AD mapping scenario."
                     ),
                     source=f"{ca.config_string or ca.name}: policy\\DisableExtensionList",
                 )

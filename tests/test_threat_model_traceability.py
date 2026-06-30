@@ -176,9 +176,9 @@ def test_esc_threat_model_matches_detectors() -> None:
 
     Only ``Static`` / ``Static (enabling config)`` verdicts require a detector;
     ``Out``, ``Out (unresolved)``, and ``Static (not yet implemented)`` are
-    exempt. This is what lets ESC12 be documented as unresolved and ESC16 as
-    not-yet-implemented without forcing stub detectors, while still keeping the
-    catalogue honest: every row must carry a recognized verdict.
+    exempt. This is what lets ESC12 be documented as unresolved without forcing a
+    stub detector, while still keeping the catalogue honest: every row must carry
+    a recognized verdict.
     """
     rows = _esc_rows_in_threat_model()
     row_ids = {esc for esc, _ in rows}
