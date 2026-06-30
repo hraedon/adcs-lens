@@ -5,7 +5,8 @@
 .DESCRIPTION
   Captures the inputs the adcs-lens deterministic core ingests, READ-ONLY:
     * CA registry config via `certutil -getreg` (policy EditFlags, CA
-      InterfaceFlags, AuditFilter) — read locally on the CA host.
+      InterfaceFlags, AuditFilter, policy DisableExtensionList) — read locally
+      on the CA host.
     * AD Public Key Services objects via LDAP with EXPLICIT credentials
       (enrollment services, certificate templates, enterprise OIDs).
 
@@ -50,7 +51,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$COLLECTOR_VERSION = '0.4.3'
+$COLLECTOR_VERSION = '0.4.4'
 
 function _b64([string]$s) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($s)) }
 
@@ -130,6 +131,25 @@ function _parseCertutilDwordLines($lines) {
     if ($line -match '=\s*([0-9a-fA-Fx]+)\s*\(') { return [Convert]::ToInt64($Matches[1].Replace('0x', ''), 16) }
   }
   return $null
+}
+# Parse certutil -getreg REG_MULTI_SZ output (e.g. policy\DisableExtensionList -> ESC16).
+# certutil prints the value name + 'REG_MULTI_SZ' then each string on its own indented
+# line; a first value may also follow '=' on the marker line. Returns the bare strings.
+function _parseCertutilMultiSzLines($lines) {
+  $out = @()
+  $inMulti = $false
+  foreach ($line in $lines) {
+    if ($line -match 'REG_MULTI_SZ') {
+      $inMulti = $true
+      if ($line -match '=\s*(\S+)') { $out += $Matches[1] }
+      continue
+    }
+    if ($inMulti) {
+      if ($line -match '^\s+(\S+)') { $out += $Matches[1] }
+      elseif ($line.Trim().Length) { break }
+    }
+  }
+  ,$out
 }
 
 # IIS enrollment-endpoint classifiers (ESC8). Top-level so the self-test reaches
@@ -257,6 +277,7 @@ function _caSecurityAces([string]$caName) {
 # Parse certutil's own decoded "FLAG_NAME -- value" lines for EditFlags/InterfaceFlags.
 function _certutilFlags([string]$regpath) { _parseCertutilFlagLines (& certutil -getreg $regpath 2>$null) }
 function _certutilDword([string]$regpath) { _parseCertutilDwordLines (& certutil -getreg $regpath 2>$null) }
+function _certutilMultiSz([string]$regpath) { _parseCertutilMultiSzLines (& certutil -getreg $regpath 2>$null) }
 
 # --- self-test boundary -----------------------------------------------------
 # Everything above is a pure function/data definition. The Pester suite dot-sources
@@ -274,6 +295,7 @@ $caCommonName = ((& certutil -getreg CA\CommonName 2>$null) | Where-Object { $_ 
 $editFlags      = _certutilFlags 'policy\EditFlags'
 $interfaceFlags = _certutilFlags 'CA\InterfaceFlags'
 $auditFilter    = _certutilDword 'CA\AuditFilter'
+$disabledExt    = _certutilMultiSz 'policy\DisableExtensionList'
 
 # --- enrollment services (CAs) ----------------------------------------------
 $enrollRoot = _ldapRoot 'CN=Enrollment Services'
@@ -294,6 +316,7 @@ foreach ($r in (_search $enrollRoot '(objectClass=pKIEnrollmentService)')) {
     audit_filter   = $auditFilter
     validity       = ''
     roles          = @()
+    disabled_extensions = (@($disabledExt))
   }
 }
 

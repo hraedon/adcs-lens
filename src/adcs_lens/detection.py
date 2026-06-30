@@ -47,6 +47,8 @@ _ENROLLEE_SUPPLIES_SUBJECT = frozenset(
 _MANAGER_APPROVAL = "PEND_ALL_REQUESTS"
 # Enrollment flag behind ESC9 (issued cert omits szOID_NTDS_CA_SECURITY_EXT).
 _NO_SECURITY_EXTENSION = "NO_SECURITY_EXTENSION"
+# ESC16: the same extension disabled CA-wide via policy\DisableExtensionList.
+_NTDS_CA_SECURITY_EXT = "1.3.6.1.4.1.311.25.2"
 
 # EKUs whose presence lets the issued cert authenticate as its subject. A
 # template with *no* EKU is equally dangerous (valid for any purpose).
@@ -795,6 +797,40 @@ def detect_esc9(estate: Estate) -> list[Finding]:
                         "specific mapping scenario requires it."
                     ),
                     source=f"template '{tmpl.name}': msPKI-Enrollment-Flag",
+                )
+            )
+    return findings
+
+
+def detect_esc16(estate: Estate) -> list[Finding]:
+    """Flag CAs that disable the SID security extension CA-wide.
+
+    ESC16: the CA's ``DisableExtensionList`` policy setting contains
+    ``szOID_NTDS_CA_SECURITY_EXT``, so every certificate the CA issues omits the
+    SID security extension — the CA-level analogue of ESC9's per-template
+    ``NO_SECURITY_EXTENSION`` flag. Where DC ``StrongCertificateBindingEnforcement``
+    is not enforcing, the cert can be mapped to a different (higher-privilege)
+    account. We flag the enabling CA configuration; the mapping/relay itself is
+    out of scope. Readable from the CA policy registry with no ACL dependency, so
+    it evaluates on every export (unlike ESC1).
+    """
+    findings: list[Finding] = []
+    for ca in estate.cas:
+        if _NTDS_CA_SECURITY_EXT in ca.disabled_extensions:
+            findings.append(
+                Finding(
+                    check="ESC16",
+                    severity=Severity.HIGH,
+                    title="CA-wide disable of the SID security extension",
+                    subject=ca.name,
+                    detail=(
+                        "The CA's DisableExtensionList contains szOID_NTDS_CA_SECURITY_EXT, "
+                        "so every issued certificate omits the SID security extension. Where "
+                        "DC StrongCertificateBindingEnforcement is not enforcing, a certificate "
+                        "can be mapped to another account. Remove the OID from "
+                        "policy\\DisableExtensionList, then restart certsvc."
+                    ),
+                    source=f"{ca.config_string or ca.name}: policy\\DisableExtensionList",
                 )
             )
     return findings
@@ -1631,6 +1667,7 @@ def run_all(
         *detect_esc11(estate),
         *detect_esc13(estate),
         *detect_esc15(estate),
+        *detect_esc16(estate),
         *detect_infra_cert_expiry(estate, now=now, warn_days=warn_days),
         *detect_weak_signing(estate),
         *detect_weak_key_size(estate),

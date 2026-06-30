@@ -64,6 +64,29 @@ Describe '_parseCertutilDwordLines' {
     }
 }
 
+Describe '_parseCertutilMultiSzLines' {
+    It 'collects indented continuation values (multi-value)' {
+        $lines = @(
+            '  DisableExtensionList REG_MULTI_SZ =',
+            '    1.3.6.1.4.1.311.25.2',
+            '    2.5.29.14',
+            'CertUtil: -getreg command completed successfully.'
+        )
+        (_parseCertutilMultiSzLines $lines) | Should -Be @('1.3.6.1.4.1.311.25.2', '2.5.29.14')
+    }
+    It 'captures a same-line value after =' {
+        $lines = @(
+            '  DisableExtensionList REG_MULTI_SZ = 1.3.6.1.4.1.311.25.2',
+            'CertUtil: -getreg command completed successfully.'
+        )
+        (_parseCertutilMultiSzLines $lines) | Should -Be @('1.3.6.1.4.1.311.25.2')
+    }
+    It 'returns empty when the value is absent' {
+        $lines = @('CertUtil: -getreg command completed successfully.')
+        ((_parseCertutilMultiSzLines $lines) -join ',') | Should -Be ''
+    }
+}
+
 Describe '_epaToken (Extended Protection token)' {
     It 'maps require values' { _epaToken 2 | Should -Be 'require'; _epaToken 'Require' | Should -Be 'require' }
     It 'maps allow values' { _epaToken 1 | Should -Be 'allow' }

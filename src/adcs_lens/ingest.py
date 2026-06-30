@@ -193,6 +193,9 @@ def ingest(export_dir: str | Path) -> Estate:
                 roles=frozenset(_coerce_str(r) for r in ca.get("roles", [])),
                 security=_aces(ca_security.get(name)),
                 certs=tuple(cert_by_ca.get(name, [])),
+                disabled_extensions=frozenset(
+                    _coerce_str(o) for o in ca.get("disabled_extensions", [])
+                ),
             )
         )
 

@@ -111,7 +111,7 @@ adcs-lens diff  OLD NEW --exit-code       # non-zero on regressions (for schedul
 
 > Status: the deterministic core is built and tested (ingest → `doctor`) with
 > **ESC1**, **ESC2**, **ESC3**, **ESC4**, **ESC5**, **ESC6**, **ESC7**, **ESC8**,
-> **ESC9**, **ESC10**, **ESC11**, **ESC13**, **ESC14**, **ESC15** and
+> **ESC9**, **ESC10**, **ESC11**, **ESC13**, **ESC14**, **ESC15**, **ESC16** and
 > infrastructure cert/CRL-expiry detectors, plus crypto/operational hygiene
 > detectors (`WEAK_SIG_ALG`, `WEAK_KEY_SIZE` / `WEAK_TEMPLATE_KEY_SIZE`,
 > `CA_AUDIT_DISABLED` / `CA_AUDIT_UNDERSCOPED`). Per-template ACL-gap detection
@@ -139,10 +139,10 @@ adcs-lens diff  OLD NEW --exit-code       # non-zero on regressions (for schedul
 
 ## Status
 
-Core built (Plan 001 Phases 0, 1, 2, 3) with ESC1/2/3/4/5/6/7/8/9/10/11/13/14/15
+Core built (Plan 001 Phases 0, 1, 2, 3) with ESC1/2/3/4/5/6/7/8/9/10/11/13/14/15/16
 detectors, infrastructure cert/CRL-expiry checks, and crypto/operational hygiene
 detectors (weak signing algorithm, weak CA/template key size, CA audit
-configuration) — the statically-detectable ESC family (ESC12 has no established static prerequisite; ESC16 is statically detectable but not yet implemented — see `docs/threat-model.md`) and statically-detectable hygiene rows the
+configuration) — the statically-detectable ESC family (ESC12 has no established static prerequisite — see `docs/threat-model.md`) and statically-detectable hygiene rows the
 threat model marks. The collector — including the opt-in ESC10/ESC14 DC
 certificate-mapping passes — is validated against the live lab. Remaining: a live
 *positive* (vulnerable-config) validation for the newer detectors (ESC10/11/13/14

@@ -95,10 +95,9 @@ WMI StdRegProv with explicit creds); validated end-to-end against a live
 enterprise CA. ESC15 (EKUwu / CVE-2024-49019) flags schema v1 templates a low-priv
 principal can enroll in (the requester injects application policies on an unpatched
 CA) — reuses existing collector data (schema_version + enroll ACL), no new pass.
-The statically-detectable ESC family is now built (ESC1–ESC11, ESC13–ESC15;
+The statically-detectable ESC family is now built (ESC1–ESC11, ESC13–ESC16;
 ESC12 has no established static-detectability boundary — see
-`docs/threat-model.md`, tracked as WI-026; ESC16 — CA-wide security-extension
-disable — is statically detectable but not yet implemented, tracked as WI-036).
+`docs/threat-model.md`, tracked as WI-026).
 ESC5 is
 negative-validated on the real CA with positive validation via the synthetic
 fixture; ESC8/ESC10/ESC11/ESC13/ESC14 are **positive-validated on the real lab**

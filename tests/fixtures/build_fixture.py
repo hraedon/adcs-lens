@@ -69,6 +69,7 @@ def build_export(
                 "audit_filter": 127,
                 "validity": "20 Years",
                 "roles": [],
+                "disabled_extensions": [],
             },
             {
                 "name": ISSUING_CA,
@@ -81,6 +82,10 @@ def build_export(
                 "audit_filter": 0,
                 "validity": "5 Years",
                 "roles": ["Web Enrollment"],
+                # ESC16 enabling config: the CA-wide DisableExtensionList contains
+                # szOID_NTDS_CA_SECURITY_EXT, so every issued cert omits the SID
+                # extension (the CA-level analogue of the ESC9 template flag).
+                "disabled_extensions": ["1.3.6.1.4.1.311.25.2"],
             },
         ],
     )

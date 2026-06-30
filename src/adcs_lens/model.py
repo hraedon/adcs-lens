@@ -212,6 +212,9 @@ class CertAuthority:
     roles: frozenset[str]
     security: tuple[AceEntry, ...]
     certs: tuple[CertLifecycle, ...]
+    # OIDs the CA strips from every issued cert (policy\DisableExtensionList).
+    # Empty by default so pre-field exports read as "no gap" (no false ESC16).
+    disabled_extensions: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)

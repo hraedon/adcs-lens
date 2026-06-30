@@ -18,6 +18,7 @@ from adcs_lens.detection import (
     detect_esc9,
     detect_esc11,
     detect_esc13,
+    detect_esc16,
     detect_infra_cert_expiry,
     detect_template_acl_gaps,
     detect_weak_key_size,
@@ -104,6 +105,7 @@ def _ca(
     audit_filter: int | None = None,
     certs: tuple[CertLifecycle, ...] = (),
     security: tuple[AceEntry, ...] = (),
+    disabled_extensions: tuple[str, ...] = (),
 ) -> CertAuthority:
     return CertAuthority(
         name=name,
@@ -117,6 +119,7 @@ def _ca(
         roles=frozenset(),
         security=security,
         certs=certs,
+        disabled_extensions=frozenset(disabled_extensions),
     )
 
 
@@ -503,6 +506,46 @@ def test_esc9_evaluates_even_without_template_security() -> None:
         _estate(templates=(tmpl,), skipped_passes=("template-security",))
     )
     assert len(findings) == 1
+
+
+# --- ESC16 -----------------------------------------------------------------
+
+
+def test_esc16_flagged_when_security_extension_disabled_ca_wide() -> None:
+    ca = _ca("WeakCA", disabled_extensions=("1.3.6.1.4.1.311.25.2",))
+    findings = detect_esc16(_estate(cas=(ca,)))
+    assert len(findings) == 1
+    assert findings[0].check == "ESC16"
+    assert findings[0].severity == Severity.HIGH
+    assert findings[0].subject == "WeakCA"
+    assert "DisableExtensionList" in findings[0].source
+
+
+def test_esc16_clean_ca_no_finding() -> None:
+    assert detect_esc16(_estate(cas=(_ca("GoodCA"),))) == []
+
+
+def test_esc16_not_flagged_for_unrelated_disabled_oid() -> None:
+    # Only szOID_NTDS_CA_SECURITY_EXT triggers ESC16; another disabled OID does not.
+    ca = _ca("OtherCA", disabled_extensions=("2.5.29.14",))
+    assert detect_esc16(_estate(cas=(ca,))) == []
+
+
+def test_esc16_evaluates_without_template_security() -> None:
+    # ESC16 is CA-level (no ACL dependency), so it works on an ACL-skipped export.
+    ca = _ca("WeakCA", disabled_extensions=("1.3.6.1.4.1.311.25.2",))
+    findings = detect_esc16(
+        _estate(cas=(ca,), skipped_passes=("template-security",))
+    )
+    assert len(findings) == 1
+
+
+def test_esc16_flags_each_vulnerable_ca() -> None:
+    two = (
+        _ca("CA1", disabled_extensions=("1.3.6.1.4.1.311.25.2",)),
+        _ca("CA2", disabled_extensions=("1.3.6.1.4.1.311.25.2",)),
+    )
+    assert len(detect_esc16(_estate(cas=two))) == 2
 
 
 # --- ESC10 -----------------------------------------------------------------

@@ -228,6 +228,22 @@ CONSEQUENCES: dict[str, ConsequenceEntry] = {
             "and restrict Enroll rights."
         ),
     ),
+    "ESC16": ConsequenceEntry(
+        check="ESC16",
+        summary=(
+            "The certificate authority is configured to omit the SID security extension from "
+            "every certificate it issues."
+        ),
+        consequence=(
+            "Without the SID binding, certificates from this CA can be mapped to different "
+            "accounts on a domain controller that does not enforce strong certificate binding, "
+            "enabling impersonation of privileged accounts across the whole CA."
+        ),
+        remediation=(
+            "Remove szOID_NTDS_CA_SECURITY_EXT from the CA's DisableExtensionList policy "
+            "setting and restart the certificate service."
+        ),
+    ),
     "CA_CERT_EXPIRY": ConsequenceEntry(
         check="CA_CERT_EXPIRY",
         summary="A certificate authority certificate has expired or is about to expire.",

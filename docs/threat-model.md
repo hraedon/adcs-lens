@@ -43,7 +43,7 @@ The detectability column *is* the "flag, don't probe" principle made concrete:
 | ESC13 | Issuance-policy OID linked to a privileged group | **Static** | template `msPKI-Certificate-Policy` + `msDS-OIDToGroupLink` on the OID object |
 | ESC14 | Weak explicit cert mapping via `altSecurityIdentities` | **Static** (needs AD object read in export) | AD principal `altSecurityIdentities` |
 | ESC15 | EKUwu (CVE-2024-49019): v1 template + application policies in request | **Static (enabling config)** — flag vulnerable v1 templates + CA patch state; request-side is **Out** | template schema version + name flags; CA build/patch level |
-| ESC16 | CA-wide disable of the security extension (`disabled_extensions` contains `1.3.6.1.4.1.311.25.2`) — the CA-level analogue of ESC9 | **Static (not yet implemented)** | CA `disabled_extensions` (tracked as WI-036) |
+| ESC16 | CA-wide disable of the security extension (`disabled_extensions` contains `1.3.6.1.4.1.311.25.2`) — the CA-level analogue of ESC9 | **Static** | CA `disabled_extensions` (policy `DisableExtensionList`) |
 
 ## Non-ESC hygiene & lifecycle
 
