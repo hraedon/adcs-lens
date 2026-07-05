@@ -1,18 +1,20 @@
-"""Mechanical gate against leaking real AD CS export data into the repo.
+"""Mechanical gate against committing work-domain identifiers.
 
 Two complementary checks:
 
 1. Always-on (no configuration): no tracked file may live under ``samples/``.
    ``.gitignore`` is advisory — ``git add -f`` bypasses it — so this guard makes
-   an accidental force-add of a real export fail CI. Real exports contain CA
-   names, OIDs, SIDs, and domain names that must never be committed (AGENTS.md).
+   an accidental force-add of a real identifier-bearing data file fail CI. The
+   ``samples/`` directory holds real environment data (hostnames, service
+   accounts, principal handles) that must never be committed (AGENTS.md).
 
 2. Secret-driven: when ``ADCS_LENS_FORBIDDEN_IDENTIFIERS`` is set (a
-   whitespace-separated list of real CA / domain / template identifiers), every
-   tracked text file outside ``samples/`` is scanned for those identifiers. This
-   catches real names that leaked into docs, tests, or breadcrumbs. It is a
-   no-op (exit 0) until the secret is configured, so it never blocks a fresh
-   clone or a fork without the secret.
+   whitespace-separated list of real identifiers — hostnames, emails, service
+   accounts, principal handles, personal names), every tracked text file
+   outside ``samples/`` is scanned for those identifiers. This catches real
+   names that leaked into docs, tests, or reflections. It is a no-op (exit 0)
+   until the secret is configured, so it never blocks a fresh clone or a fork
+   without the secret.
 
 Run locally: python scripts/check_committed_identifiers.py
 """
@@ -29,9 +31,11 @@ from pathlib import Path
 
 MIN_IDENTIFIER_LENGTH = 4
 _BINARY_SNIFF_LEN = 8192
-# Dirs skipped by the identifier scan: samples holds real exports (the always-on
-# guard below owns that vector), .venv is build output with no source of our own.
-_SKIP_DIRS = frozenset({"samples", ".venv"})
+# Dirs skipped by the identifier scan: .venv is build output. The always-on
+# guard below handles root-level samples/ (which holds real identifier-bearing
+# data); nested directories named samples/ (e.g. tests/samples/) are legitimate
+# code dirs and SHOULD be scanned.
+_SKIP_DIRS = frozenset({".venv"})
 # Root-level gitignored data dirs that must never contain a tracked file. The
 # guard matches the first path component so a legitimate nested code dir named
 # ``samples`` (e.g. ``tests/samples/``) is not a false positive.
@@ -56,8 +60,19 @@ def _filter_identifiers(identifiers: frozenset[str]) -> frozenset[str]:
 
 
 def parse_identifier_set(raw: str) -> frozenset[str]:
-    """Build a normalized set of identifiers from a whitespace-separated string."""
-    return _filter_identifiers(frozenset(raw.split()))
+    """Build a normalized set of identifiers from the raw denylist.
+
+    Accepts whitespace-separated tokens (the CI-secret form) and/or one token
+    per line. Full-line and trailing ``#`` comments are stripped, so a
+    human-maintained denylist file may document itself without every comment
+    word becoming a forbidden token.
+    """
+    tokens: set[str] = set()
+    for line in raw.splitlines() or [raw]:
+        content = line.split("#", 1)[0].strip()
+        if content:
+            tokens.update(content.split())
+    return _filter_identifiers(frozenset(tokens))
 
 
 def scan_text(text: str, identifiers: frozenset[str]) -> Iterator[Violation]:
@@ -99,7 +114,7 @@ def _sniff_encoding(chunk: bytes) -> str | None:
 
 
 def _is_binary(chunk: bytes) -> bool:
-    """Heuristic: null byte present without a recognized text BOM -> binary."""
+    """Heuristic: null byte present without a recognized text BOM → binary."""
     if _sniff_encoding(chunk) is not None:
         return False
     return b"\x00" in chunk
@@ -131,10 +146,15 @@ def scan_files(identifiers: frozenset[str], paths: list[Path]) -> list[Violation
     return violations
 
 
-def collect_tracked_paths() -> list[Path]:
-    """Return tracked file paths from ``git ls-files``."""
+def _paths_from_git(args: list[str]) -> list[Path]:
+    """Run a NUL-delimited git path command and return Paths.
+
+    No filtering is applied here — the always-on samples/ guard needs to see
+    every tracked path so it can detect a force-add. The identifier scan
+    filters out _SKIP_DIRS separately.
+    """
     result = subprocess.run(
-        ["git", "ls-files", "-z"],
+        args,
         capture_output=True,
         text=True,
         check=True,
@@ -147,6 +167,37 @@ def collect_tracked_paths() -> list[Path]:
     return paths
 
 
+def collect_tracked_paths() -> list[Path]:
+    """Return tracked file paths from ``git ls-files``, excluding obvious skips."""
+    return _paths_from_git(["git", "ls-files", "-z"])
+
+
+def collect_staged_paths() -> list[Path]:
+    """Return staged (added/copied/modified/renamed) paths for the pre-commit hook.
+
+    Scans only what is about to be committed rather than the whole tree, so the
+    local gate is fast enough to run on every commit. Deletions are excluded
+    (``--diff-filter=ACM``) because there is nothing to scan. ``--no-renames``
+    decomposes renames into add+delete so the new path (e.g. a file moved into
+    ``samples/``) is included as an addition and caught by the always-on guard.
+    """
+    return _paths_from_git(
+        [
+            "git", "diff", "--cached", "--name-only",
+            "--diff-filter=ACM", "--no-renames", "-z",
+        ]
+    )
+
+
+def print_report(violations: list[Violation]) -> None:
+    violations.sort(key=lambda v: (str(v.path), v.line_number, v.identifier))
+    print("Committed identifier violations detected:", file=sys.stderr)
+    for v in violations:
+        print(f"  {v.path}:{v.line_number}: {v.identifier!r}", file=sys.stderr)
+        print(f"      {v.line.rstrip()}", file=sys.stderr)
+    print(f"\nTotal: {len(violations)} violation(s)", file=sys.stderr)
+
+
 def leaked_tracked_files(paths: list[Path], guarded: frozenset[str]) -> list[Path]:
     """Tracked files whose root component is a guarded (gitignored) data dir.
 
@@ -156,22 +207,19 @@ def leaked_tracked_files(paths: list[Path], guarded: frozenset[str]) -> list[Pat
     return [p for p in paths if p.parts and p.parts[0] in guarded]
 
 
-def print_identifier_report(violations: list[Violation]) -> None:
-    violations.sort(key=lambda v: (str(v.path), v.line_number, v.identifier))
-    print("Committed identifier violations detected:", file=sys.stderr)
-    for v in violations:
-        print(f"  {v.path}:{v.line_number}: {v.identifier!r}", file=sys.stderr)
-        print(f"      {v.line.rstrip()}", file=sys.stderr)
-    print(f"\nTotal: {len(violations)} violation(s)", file=sys.stderr)
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Gate that prevents committing real AD CS export data.",
+        description="Gate that prevents committing forbidden domain identifiers.",
     )
-    parser.parse_args(argv)
+    parser.add_argument(
+        "--staged",
+        action="store_true",
+        help="Scan only staged files (for the pre-commit hook) instead of the "
+        "full tracked tree (the CI default).",
+    )
+    args = parser.parse_args(argv)
 
-    paths = collect_tracked_paths()
+    paths = collect_staged_paths() if args.staged else collect_tracked_paths()
 
     # 1. Always-on: no tracked file under a guarded (gitignored) data dir. This
     #    catches a ``git add -f samples/...`` leak regardless of secret config.
@@ -181,9 +229,9 @@ def main(argv: list[str] | None = None) -> int:
         for p in sorted(leaked, key=str):
             print(f"  {p}", file=sys.stderr)
         print(
-            "\nThese paths are gitignored by convention (samples/ holds real AD CS "
-            "exports with CA names, OIDs, SIDs, and domain names). Remove them from "
-            "the index: git rm --cached -r <path>.",
+            "\nThese paths are gitignored by convention (samples/ holds real "
+            "identifier-bearing data — hostnames, service accounts, principal "
+            "handles). Remove them from the index: git rm --cached -r <path>.",
             file=sys.stderr,
         )
         return 1
@@ -210,7 +258,7 @@ def main(argv: list[str] | None = None) -> int:
     scan_paths = [p for p in paths if not any(part in _SKIP_DIRS for part in p.parts)]
     violations = scan_files(identifiers, scan_paths)
     if violations:
-        print_identifier_report(violations)
+        print_report(violations)
         return 1
 
     return 0
