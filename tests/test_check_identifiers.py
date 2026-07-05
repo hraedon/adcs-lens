@@ -195,16 +195,17 @@ def test_main_exits_zero_when_no_violation(
     assert checker.main([]) == 0
 
 
-def test_main_scan_skips_samples_dir(
+def test_main_scan_reads_nested_samples_dir(
     monkeypatch: pytest.MonkeyPatch, checker: ModuleType, tmp_path: Path
 ) -> None:
-    # The identifier scan never reads files under a ``samples`` component (the
-    # always-on guard owns the root samples/ vector). Here the path is absolute
-    # (so parts[0] is the filesystem root, not ``samples``) -> the guard stays
-    # clean, and the scan skips the file because ``samples`` is among its parts.
+    # Canonical behavior: only a ROOT-level ``samples/`` is guarded/skipped (it
+    # holds real export data); a NESTED ``samples/`` component (e.g. tests/samples/)
+    # is a legitimate code dir and IS scanned. Here the path's root component is the
+    # filesystem root (not ``samples``), so the guard stays clean and the scan reads
+    # the nested file and flags the forbidden token.
     nested = tmp_path / "samples" / "notes.txt"
     nested.parent.mkdir(parents=True)
     nested.write_text("FAKEDOM secret\n", encoding="utf-8")
     monkeypatch.setenv("ADCS_LENS_FORBIDDEN_IDENTIFIERS", "FAKEDOM")
     monkeypatch.setattr(checker.subprocess, "run", _git_returning([nested]))
-    assert checker.main([]) == 0
+    assert checker.main([]) == 1
