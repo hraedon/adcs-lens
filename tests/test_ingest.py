@@ -67,10 +67,13 @@ def test_template_security_round_trips(json_export: Path) -> None:
 
 
 def test_certs_parsed_bool_when_no_certs_dir(json_export: Path) -> None:
-    # No certs/ dir in the json-only export; certs_parsed mirrors module
-    # availability (True when [certs] installed, False otherwise) — never crashes.
+    # No certs/ dir in the json-only export; certs_parsed reflects whether
+    # lifecycle (cert/CRL) data was actually parsed, not merely whether the
+    # [certs] extra is installed. With no certs/index.json it is False even
+    # when cryptography is importable, so the lifecycle detector degrades
+    # honestly rather than silently passing as "clean".
     estate = ingest(json_export)
-    assert isinstance(estate.manifest.certs_parsed, bool)
+    assert estate.manifest.certs_parsed is False
     assert estate.crls == ()
 
 
@@ -110,6 +113,79 @@ def test_null_manifest_fields_coerce_to_empty(tmp_path: Path) -> None:
     assert m.domain == ""
 
 
+def test_audit_filter_coerces_string_and_hex(tmp_path: Path) -> None:
+    # certutil often renders AuditFilter as a string (sometimes hex). Ingest must
+    # coerce to int so detect_audit_config does not TypeError on a real export.
+    (tmp_path / "collector-manifest.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "ca-config.json").write_text(
+        json.dumps([{"name": "CA1", "audit_filter": "0x7F"}]), encoding="utf-8"
+    )
+    assert ingest(tmp_path).cas[0].audit_filter == 127
+
+    (tmp_path / "ca-config.json").write_text(
+        json.dumps([{"name": "CA1", "audit_filter": "127"}]), encoding="utf-8"
+    )
+    assert ingest(tmp_path).cas[0].audit_filter == 127
+
+
+def test_audit_filter_rejects_bool(tmp_path: Path) -> None:
+    # JSON true must not become 1; reject it so a malformed export is loud.
+    (tmp_path / "collector-manifest.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "ca-config.json").write_text(
+        json.dumps([{"name": "CA1", "audit_filter": True}]), encoding="utf-8"
+    )
+    with pytest.raises(IngestError, match="AuditFilter"):
+        ingest(tmp_path)
+
+
+def test_min_key_size_coerces_string(tmp_path: Path) -> None:
+    (tmp_path / "collector-manifest.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "templates.json").write_text(
+        json.dumps([{"name": "T", "min_key_size": "1024"}]), encoding="utf-8"
+    )
+    assert ingest(tmp_path).templates[0].min_key_size == 1024
+
+
+def test_min_key_size_rejects_bool(tmp_path: Path) -> None:
+    (tmp_path / "collector-manifest.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "templates.json").write_text(
+        json.dumps([{"name": "T", "min_key_size": True}]), encoding="utf-8"
+    )
+    with pytest.raises(IngestError, match="min_key_size"):
+        ingest(tmp_path)
+
+
+def test_endpoint_bool_coerces_string_false(tmp_path: Path) -> None:
+    # A JSON string "false" is truthy under naive bool(); ingest must read it as
+    # False so the cleartext-HTTP ESC8 signal is not suppressed.
+    (tmp_path / "collector-manifest.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "web-endpoints.json").write_text(
+        json.dumps([{"name": "/CertSrv", "ssl_required": "false", "windows_auth": "true"}]),
+        encoding="utf-8",
+    )
+    ep = ingest(tmp_path).endpoints[0]
+    assert ep.ssl_required is False
+    assert ep.windows_auth is True
+
+
+def test_enum_kind_case_insensitive(tmp_path: Path) -> None:
+    # PowerShell/certutil frequently emit TitleCase; the StrEnum values are
+    # lower-case. A casing mismatch must not raise IngestError.
+    (tmp_path / "collector-manifest.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "ca-config.json").write_text(
+        json.dumps([{"name": "CA1", "kind": "Root"}]), encoding="utf-8"
+    )
+    (tmp_path / "pki-acls.json").write_text(
+        json.dumps([{"object_dn": "CN=NTAuth", "kind": "NTAuth", "security": []}]),
+        encoding="utf-8",
+    )
+    estate = ingest(tmp_path)
+    from adcs_lens.model import AclKind, CaKind
+
+    assert estate.cas[0].kind is CaKind.ROOT
+    assert estate.acls[0].kind is AclKind.NTAUTH
+
+
 def test_template_acl_obtained_round_trips(tmp_path: Path) -> None:
     # Explicit false round-trips through ingest.
     (tmp_path / "collector-manifest.json").write_text("{}", encoding="utf-8")
@@ -143,6 +219,22 @@ def test_full_export_lifecycle(full_export: Path) -> None:
     assert len(estate.crls) == 2
     assert any(c.tier == CrlTier.ROOT for c in estate.crls)
     assert any(c.tier == CrlTier.ISSUING for c in estate.crls)
+
+
+def test_crl_only_export_flips_certs_parsed(full_export: Path) -> None:
+    # An export whose certs/index.json carries CRLs but no certs must still
+    # report certs_parsed=True — the lifecycle path ran and parsed CRLs, so
+    # the detector must not degrade to a false "not evaluated" note.
+    import json as _json
+
+    index_path = full_export / "certs" / "index.json"
+    index = _json.loads(index_path.read_text(encoding="utf-8"))
+    index["certs"] = []  # strip certs, keep CRLs
+    index_path.write_text(_json.dumps(index), encoding="utf-8")
+    estate = ingest(full_export)
+    assert estate.manifest.certs_parsed is True
+    assert len(estate.crls) == 2
+    assert estate.cas[0].certs == ()  # no certs populated
 
 
 def test_severity_enum_round_trips(json_export: Path) -> None:

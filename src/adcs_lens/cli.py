@@ -161,6 +161,9 @@ def _cmd_diff(
 
     print(render_diff_json(report) if as_json else render_diff_text(report))
 
+    # Degradation notes (coverage-gap INFO) are excluded from `regressions` by
+    # the DriftReport property itself, so the gate agrees with the JSON/text
+    # summary and with `doctor --exit-code` (cli.py:141).
     if exit_code and report.regressions:
         return 1
     return 0

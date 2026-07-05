@@ -55,6 +55,53 @@ def _coerce_str(value: Coerced) -> str:
     return "" if value is None else str(value).strip()
 
 
+def _coerce_bool(value: Coerced, default: bool = False) -> bool:
+    """Coerce a JSON value to bool, tolerating string forms PowerShell may emit.
+
+    JSON booleans pass through; ``None`` yields *default*; strings are matched
+    case-insensitively against the common truthy/falsey spellings so that a
+    collector emitting ``"false"`` (truthy under naive ``bool(...)``) is not
+    misread as ``True``.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in ("true", "1", "yes", "on"):
+            return True
+        if s in ("false", "0", "no", "off", ""):
+            return False
+    return default
+
+
+def _coerce_int(value: Coerced, context: str) -> int | None:
+    """Coerce a JSON value to ``int | None``, raising IngestError on a bad type.
+
+    ``None`` → ``None`` (field absent). Ints pass through. Strings are parsed,
+    tolerating a ``0x`` hex prefix (AuditFilter is often rendered hex by
+    certutil). Bools are rejected so JSON ``true`` never becomes ``1``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise IngestError(f"invalid {context}: {value!r} (expected an integer)")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        try:
+            return int(s, 16) if s.lower().startswith("0x") else int(s)
+        except ValueError as exc:
+            raise IngestError(f"invalid {context}: {value!r}") from exc
+    raise IngestError(f"invalid {context}: {value!r} (expected an integer)")
+
+
 def _load(export_dir: Path, name: str) -> Any:
     """Load one JSON file, tolerating a BOM and a missing file (-> None)."""
     path = export_dir / name
@@ -102,6 +149,19 @@ def _kind(value: Any, enum: type[Any], context: str, default: str | None = None)
     s = _coerce_str(value)
     if not s:
         s = default or ""
+    else:
+        # Enum values are lower-case (see model.py); tolerate collector casing
+        # (PowerShell/certutil frequently emit TitleCase) by matching on the
+        # lower-cased input first, then a case-insensitive fallback against the
+        # enum value strings so a stray casing drift never raises IngestError.
+        lowered = s.lower()
+        try:
+            return enum(lowered)
+        except ValueError:
+            pass
+        for member in enum:
+            if isinstance(member.value, str) and member.value.lower() == lowered:
+                return member
     try:
         return enum(s)
     except ValueError as exc:
@@ -144,6 +204,11 @@ def ingest(export_dir: str | Path) -> Estate:
     cert_by_ca: dict[str, list[CertLifecycle]] = {}
     crls: list[Crl] = []
     index = _load(base, "certs/index.json")
+    # ``certs_parsed`` reports whether lifecycle (cert/CRL) data was actually
+    # parsed — not merely whether the [certs] extra is installed. An installed
+    # extra against an export that ships no certs/index.json must degrade to a
+    # LIFECYCLE_NOT_EVALUATED note rather than silently passing as "clean".
+    certs_parsed = False
     if certs_mod is not None and index is not None:
         for entry in _require_list(base, "certs/index.json", index.get("certs", [])):
             path = _cert_file_path(base, entry)
@@ -154,6 +219,7 @@ def ingest(export_dir: str | Path) -> Estate:
             kind = _kind(entry.get("kind", "other"), CertKind, "cert kind", default="other")
             lifecycle = certs_mod.parse_cert(der, kind=kind)
             cert_by_ca.setdefault(_coerce_str(entry.get("ca_name", "")), []).append(lifecycle)
+            certs_parsed = True
         for entry in _require_list(base, "certs/index.json", index.get("crls", [])):
             path = _cert_file_path(base, entry)
             try:
@@ -168,6 +234,7 @@ def ingest(export_dir: str | Path) -> Estate:
                     source=_coerce_str(entry.get("source", "")),
                 )
             )
+            certs_parsed = True
 
     # --- CA configuration + security + roles ---
     ca_security = _load(base, "ca-security.json") or {}
@@ -188,7 +255,7 @@ def ingest(export_dir: str | Path) -> Estate:
                 kind=kind,
                 edit_flags=frozenset(_coerce_str(f) for f in ca.get("edit_flags", [])),
                 interface_flags=frozenset(_coerce_str(f) for f in ca.get("interface_flags", [])),
-                audit_filter=ca.get("audit_filter"),
+                audit_filter=_coerce_int(ca.get("audit_filter"), "CA AuditFilter"),
                 validity=_coerce_str(ca.get("validity", "")),
                 roles=frozenset(_coerce_str(r) for r in ca.get("roles", [])),
                 security=_aces(ca_security.get(name)),
@@ -249,8 +316,8 @@ def ingest(export_dir: str | Path) -> Estate:
             transports=frozenset(
                 _coerce_str(t).lower() for t in e.get("transports", []) if _coerce_str(t)
             ),
-            ssl_required=bool(e.get("ssl_required", False)),
-            windows_auth=bool(e.get("windows_auth", False)),
+            ssl_required=_coerce_bool(e.get("ssl_required", False)),
+            windows_auth=_coerce_bool(e.get("windows_auth", False)),
             auth_providers=frozenset(
                 _coerce_str(p).lower() for p in e.get("auth_providers", []) if _coerce_str(p)
             ),
@@ -305,7 +372,7 @@ def ingest(export_dir: str | Path) -> Estate:
         host=_coerce_str(raw_manifest.get("host", "")),
         domain=_coerce_str(raw_manifest.get("domain", "")),
         skipped_passes=tuple(_coerce_str(p) for p in raw_manifest.get("skipped_passes", [])),
-        certs_parsed=certs_mod is not None,
+        certs_parsed=certs_parsed,
     )
 
     return Estate(
@@ -340,7 +407,7 @@ def _template(
         ekus=tuple(_coerce_str(e) for e in t.get("ekus", [])),
         name_flags=frozenset(_coerce_str(f) for f in t.get("name_flags", [])),
         enrollment_flags=frozenset(_coerce_str(f) for f in t.get("enrollment_flags", [])),
-        min_key_size=t.get("min_key_size"),
+        min_key_size=_coerce_int(t.get("min_key_size"), "template min_key_size"),
         issuance_policy_oids=tuple(_coerce_str(p) for p in t.get("issuance_policy_oids", [])),
         security=_aces(t.get("security")),
         published_by=published_by,

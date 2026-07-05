@@ -254,6 +254,16 @@ def detect_esc6(estate: Estate) -> list[Finding]:
     UPN) into *any* issued certificate, regardless of template — a CA-wide
     privilege-escalation primitive. Statically readable from the CA policy
     registry; we flag the enabling flag, we do not request a certificate.
+
+    Unlike ESC11/ESC16 (which skip ``CaKind.ROOT``), ESC6 is reported for every
+    CA kind, including an offline root. The reasoning differs: ESC11/ESC16
+    gate a *relay/mapping* path that needs the CA to serve AD-auth end-entity
+    enrollment, which an offline root never does. ESC6 is a per-CA policy flag
+    (it does not propagate via the CA hierarchy): a root with it set would
+    honor requester-supplied SANs on the certificates *it* issues — i.e.
+    subordinate CA certs — which is a configuration smell regardless of whether
+    the root is currently online. It is surfaced, not silently passed.
+    Remediation is the same regardless of tier.
     """
     findings: list[Finding] = []
     for ca in estate.cas:

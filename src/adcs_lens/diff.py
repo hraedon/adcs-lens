@@ -5,36 +5,39 @@ export and reports what changed: regressions (new findings), fixes (resolved
 findings), and severity changes on the same issue. This is the air-gap-preserving
 "what got worse since the last scan" signal — no live access, just two exports.
 
-A finding's drift identity is ``(check, subject)`` — the same check on the same CA
-/ template / object. A severity change on that pair is a "changed" finding, not a
-new-and-resolved pair. Content changes (different title, detail, or source) with
-an unchanged severity are also reported as "changed" but do not count as
-regressions.
+A finding's drift identity is ``(check, subject, source)`` — the same check on
+the same object, disambiguated by the source fact so that multiple findings
+sharing a subject (e.g. two CRLs from one issuer, two certs with the same
+subject) are not silently collapsed. A severity change on that tuple is a
+"changed" finding, not a new-and-resolved pair. Content changes (different
+title, detail) with an unchanged severity are also reported as "changed" but
+do not count as regressions.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from adcs_lens.detection import Finding
+from adcs_lens.detection import Finding, is_degradation_note
 from adcs_lens.model import SEVERITY_RANK
 
 
-def _key(f: Finding) -> tuple[str, str]:
-    return (f.check, f.subject)
+def _key(f: Finding) -> tuple[str, str, str]:
+    return (f.check, f.subject, f.source)
 
 
 def _worst_first(findings: list[Finding]) -> list[Finding]:
-    return sorted(findings, key=lambda f: (SEVERITY_RANK[f.severity], f.check, f.subject))
+    return sorted(findings, key=lambda f: (SEVERITY_RANK[f.severity], f.check, f.subject, f.source))
 
 
 @dataclass(frozen=True)
 class FindingDelta:
-    """A finding that drifted between snapshots (same check + subject).
+    """A finding that drifted between snapshots (same check + subject + source).
 
-    The change can be a severity shift, a content shift (title/detail/source),
-    or both. ``content_changed`` is true only when severity stayed the same but
-    the explanatory fields changed.
+    The change can be a severity shift, a content shift (title/detail), or
+    both. ``content_changed`` is true only when severity stayed the same but
+    the explanatory fields changed. ``source`` is part of the drift identity,
+    so a source change produces a new-and-resolved pair, not a delta here.
     """
 
     old: Finding
@@ -47,17 +50,20 @@ class FindingDelta:
 
     @property
     def content_changed(self) -> bool:
-        """True when severity is unchanged but title, detail, or source differ."""
+        """True when severity is unchanged but title or detail differ.
+
+        ``source`` is part of the drift identity, so a source change is reported
+        as a new-and-resolved pair rather than a content change on the same
+        issue.
+        """
         if self.old.severity != self.new.severity:
             return False
         return (
             self.old.title,
             self.old.detail,
-            self.old.source,
         ) != (
             self.new.title,
             self.new.detail,
-            self.new.source,
         )
 
 
@@ -72,16 +78,24 @@ class DriftReport:
 
     @property
     def regressions(self) -> bool:
-        """True when posture got worse: a new finding or a worsened severity.
+        """True when posture got worse: a new posture finding or a worsened severity.
 
-        Content-only changes (same severity, changed detail/title/source) are
-        reported in ``changed`` but do not make this True.
+        Content-only changes (same severity, changed detail/title) are reported
+        in ``changed`` but do not make this True. Degradation notes (coverage-gap
+        INFO signals, e.g. a newly-missing collector pass) are excluded so the
+        report's ``regressions`` flag agrees with the ``diff --exit-code`` gate
+        and the ``doctor --exit-code`` gate — a coverage gap is not a posture
+        regression.
         """
-        return bool(self.new) or any(d.worsened for d in self.changed)
+        real_new = any(not is_degradation_note(f) for f in self.new)
+        real_worsened = any(
+            d.worsened and not is_degradation_note(d.new) for d in self.changed
+        )
+        return real_new or real_worsened
 
 
 def diff_findings(old: list[Finding], new: list[Finding]) -> DriftReport:
-    """Compute the drift between two finding sets, keyed by ``(check, subject)``."""
+    """Compute the drift between two finding sets, keyed by ``(check, subject, source)``."""
     old_by = {_key(f): f for f in old}
     new_by = {_key(f): f for f in new}
 
