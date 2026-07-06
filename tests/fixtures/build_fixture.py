@@ -67,9 +67,9 @@ def build_export(
                 "edit_flags": [],
                 "interface_flags": [],
                 "audit_filter": 127,
-                "validity": "20 Years",
-                "roles": [],
                 "disabled_extensions": [],
+                # Offline root; patch state unknown is the honest default.
+                "ca_patch_state": "unknown",
             },
             {
                 "name": ISSUING_CA,
@@ -80,12 +80,14 @@ def build_export(
                 "edit_flags": ["EDITF_ATTRIBUTESUBJECTALTNAME2"],
                 "interface_flags": ["IF_ENFORCEENCRYPTICERTREQUEST"],
                 "audit_filter": 0,
-                "validity": "5 Years",
-                "roles": ["Web Enrollment"],
                 # ESC16 enabling config: the CA-wide DisableExtensionList contains
                 # szOID_NTDS_CA_SECURITY_EXT, so every issued cert omits the SID
                 # extension (the CA-level analogue of the ESC9 template flag).
                 "disabled_extensions": ["1.3.6.1.4.1.311.25.2"],
+                # The issuing CA is modelled as unpatched for CVE-2024-49019 so the
+                # ESC15 (EKUwu) finding stays HIGH end-to-end (the common vulnerable
+                # case the fixture exercises).
+                "ca_patch_state": "unpatched",
             },
         ],
     )
@@ -171,6 +173,50 @@ def build_export(
                 "security": [],  # SD not obtained
                 "acl_obtained": False,
             },
+            {
+                # ECDSA template (WI-025): a P-256 template whose min_key_size is
+                # 256 — a curve size, not an RSA bit length. It must NOT fire
+                # WEAK_TEMPLATE_KEY_SIZE (the RSA 2048-bit baseline does not apply
+                # to ECDSA). Server-Auth EKU + no supplies-subject keep it clear
+                # of ESC1/2/3.
+                "name": "LabEcdsaClient",
+                "display_name": "Lab ECDSA Client",
+                "schema_version": 2,
+                "oid": "1.3.6.1.4.1.311.21.8.1.2.3.4.110",
+                "ekus": ["1.3.6.1.5.5.7.3.1"],  # Server Auth
+                "name_flags": [],
+                "enrollment_flags": [],
+                "min_key_size": 256,  # P-256 curve size
+                "issuance_policy_oids": [],
+                "csp": "Microsoft Software Key Storage Provider (ECDSA)",
+                "security": [
+                    {
+                        "trustee_sid": LOW_PRIV_SID,
+                        "trustee_name": "Domain Users",
+                        "rights": ["Enroll"],
+                        "ace_type": "Allow",
+                    }
+                ],
+            },
+            {
+                # Owner-based control (WI-019): a template whose security descriptor
+                # OWNER is a low-priv principal, with no DACL control ACE. The
+                # owner can rewrite the DACL to grant itself control -> an ESC4
+                # path the DACL-only check would miss. No enroll ACE so it stays
+                # clear of ESC1/2/3/15.
+                "name": "LabOwnedTemplate",
+                "display_name": "Lab Owned Template",
+                "schema_version": 2,
+                "oid": "1.3.6.1.4.1.311.21.8.1.2.3.4.120",
+                "ekus": ["1.3.6.1.5.5.7.3.1"],  # Server Auth
+                "name_flags": [],
+                "enrollment_flags": [],
+                "min_key_size": 2048,
+                "issuance_policy_oids": [],
+                "security": [],
+                "acl_obtained": True,
+                "owner_sid": LOW_PRIV_SID,
+            },
         ],
     )
 
@@ -206,6 +252,16 @@ def build_export(
                         "ace_type": "Allow",
                     }
                 ],
+            },
+            {
+                # Owner-based control (WI-019): the AIA container's owner is a
+                # low-priv principal with no DACL control ACE. The owner can
+                # rewrite the DACL to grant itself control -> an ESC5 path the
+                # DACL-only check would miss.
+                "object_dn": "CN=AIA,CN=Public Key Services,...,DC=lab,DC=example,DC=com",
+                "kind": "aia",
+                "security": [],
+                "owner_sid": LOW_PRIV_SID,
             },
         ],
     )

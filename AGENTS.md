@@ -50,8 +50,7 @@ narrates facts the core computed. See `README.md` for the full charter.
 
 ```bash
 uv venv && uv pip install -e ".[dev]"
-.venv/bin/pytest -q            # unit + fixture tests (sample tests skip if samples/ absent)
-.venv/bin/pytest -q -m samples # calibration against a real export (needs samples/)
+.venv/bin/pytest -q            # unit + fixture tests
 .venv/bin/ruff check .
 .venv/bin/mypy src
 ```
@@ -93,11 +92,21 @@ LDAP read of principal altSecurityIdentities + `esc10-dc-registry` per-DC KDC
 StrongCertificateBindingEnforcement and Schannel CertificateMappingMethods via
 WMI StdRegProv with explicit creds); validated end-to-end against a live
 enterprise CA. ESC15 (EKUwu / CVE-2024-49019) flags schema v1 templates a low-priv
-principal can enroll in (the requester injects application policies on an unpatched
-CA) — reuses existing collector data (schema_version + enroll ACL), no new pass.
+principal can enroll in, with severity tracking CA patch state (HIGH unpatched /
+MEDIUM unknown / suppressed patched) — the collector emits `ca_patch_state`
+(unknown by default; a future enhancement can populate it from the OS build).
 The statically-detectable ESC family is now built (ESC1–ESC11, ESC13–ESC16;
 ESC12 has no established static-detectability boundary — see
 `docs/threat-model.md`, tracked as WI-026).
+Phase-1 honesty/precision work closes the false-positive and false-negative
+edges: ESC7 expands broad rights (GenericAll/FullControl) via the `_COVERS`
+implication map so blanket CA control is not missed; the template weak-key
+detector is algorithm-aware (ECDSA templates skipped via CSP or unambiguous EC
+curve sizes 256/384/521); ESC4/ESC5 model owner-based control (a low-priv owner
+can rewrite the DACL); and ESC8 distinguishes EPA allow/none/unknown in the
+finding detail. The collector (v0.5.0) now emits template `csp` + `owner_sid`,
+PKI-object `owner_sid`, CA `ca_patch_state`, and decodes GENERIC_ALL on CA
+security.
 ESC5 is
 negative-validated on the real CA with positive validation via the synthetic
 fixture; ESC8/ESC10/ESC11/ESC13/ESC14 are **positive-validated on the real lab**

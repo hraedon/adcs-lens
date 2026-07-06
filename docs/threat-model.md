@@ -31,8 +31,8 @@ The detectability column *is* the "flag, don't probe" principle made concrete:
 | ESC1 | Template allows requester-supplied SAN + client-auth EKU, enrollable by low-priv | **Static** | template `msPKI-Certificate-Name-Flag` (ENROLLEE_SUPPLIES_SUBJECT), EKU list, enroll ACL |
 | ESC2 | Template with Any-Purpose EKU or no EKU (SubCA-equivalent) | **Static** | template `pKIExtendedKeyUsage` / EKU absence |
 | ESC3 | Enrollment-Agent (Certificate Request Agent) EKU usable by low-priv | **Static** | template EKU + enroll ACL |
-| ESC4 | Template object ACL grants write to low-priv (can be edited into ESC1) | **Static** | template `nTSecurityDescriptor` |
-| ESC5 | Writable ACL on PKI objects (CA objects, NTAuth, PKS containers) | **Static** | container/object `nTSecurityDescriptor` |
+| ESC4 | Template object ACL grants write to low-priv, or low-priv owner (can be edited into ESC1) | **Static** | template `nTSecurityDescriptor` (DACL + owner) |
+| ESC5 | Writable ACL / low-priv owner on PKI objects (CA objects, NTAuth, PKS containers) | **Static** | container/object `nTSecurityDescriptor` (DACL + owner) |
 | ESC6 | `EDITF_ATTRIBUTESUBJECTALTNAME2` set on the CA | **Static** | CA registry `policy\EditFlags` (`certutil -getreg`) |
 | ESC7 | CA permissions (ManageCA / ManageCertificates) held by low-priv | **Static** | CA security descriptor (`certutil -getreg CA\Security`) |
 | ESC8 | NTLM relay to HTTP/RPC enrollment (Web Enrollment / CES) | **Static (enabling config)** — detect role installed + EPA off; relay itself is **Out** | role/endpoint inventory; IIS EPA setting |
@@ -42,7 +42,7 @@ The detectability column *is* the "flag, don't probe" principle made concrete:
 | ESC12 | *Unresolved* — no statically-detectable enabling configuration has been identified in canonical tooling or published research; the ESC number is preserved for continuity. Tracked as WI-026. | **Out (unresolved)** | n/a |
 | ESC13 | Issuance-policy OID linked to a privileged group | **Static** | template `msPKI-Certificate-Policy` + `msDS-OIDToGroupLink` on the OID object |
 | ESC14 | Weak explicit cert mapping via `altSecurityIdentities` | **Static** (needs AD object read in export) | AD principal `altSecurityIdentities` |
-| ESC15 | EKUwu (CVE-2024-49019): v1 template + application policies in request | **Static (enabling config)** — flag vulnerable v1 templates + CA patch state; request-side is **Out** | template schema version + name flags; CA build/patch level |
+| ESC15 | EKUwu (CVE-2024-49019): v1 template + application policies in request | **Static (enabling config)** — flag vulnerable v1 templates; severity tracks CA patch state (HIGH unpatched / MEDIUM unknown / suppressed patched); request-side is **Out** | template schema version + name flags; CA patch state |
 | ESC16 | CA-wide disable of the security extension (`disabled_extensions` contains `1.3.6.1.4.1.311.25.2`) — the CA-level analogue of ESC9 | **Static** | CA `disabled_extensions` (policy `DisableExtensionList`) |
 
 ## Non-ESC hygiene & lifecycle
@@ -57,7 +57,7 @@ under-served by the offensive tooling entirely:
 | CRL freshness | Published CRL stale or overdue vs. its validity period | **Static** | exported CRL + config |
 | CDP / AIA reachability | Distribution points declared but unreachable/misconfigured | **Static (declared)** — config only; no live fetch | CA config |
 | Weak signing algorithm | CA signing with SHA-1 / MD5 | **Static** | CA cert / config |
-| Weak key length | CA or template minimum key size below policy | **Static** | CA cert; template `msPKI-Minimal-Key-Size` |
+| Weak key length | CA or template minimum key size below policy (RSA baseline; ECDSA templates skipped) | **Static** | CA cert; template `msPKI-Minimal-Key-Size` + CSP |
 | Audit configuration | CA auditing disabled or under-scoped | **Static** | CA registry `AuditFilter` |
 | Orphaned / unused templates | Published templates nobody should still enroll | **Static** | published-templates list vs. template inventory |
 

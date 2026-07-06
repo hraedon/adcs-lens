@@ -51,7 +51,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$COLLECTOR_VERSION = '0.4.4'
+$COLLECTOR_VERSION = '0.5.0'
 
 function _b64([string]$s) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($s)) }
 
@@ -231,7 +231,7 @@ function _objAcl([string]$dn, [string]$kind) {
   try { $r = $s.FindOne() } catch { return $null }   # object absent / no read
   if (-not $r) { return $null }
   $sdb = if ($r.Properties['ntsecuritydescriptor'].Count) { [byte[]]$r.Properties['ntsecuritydescriptor'][0] } else { $null }
-  [ordered]@{ object_dn = $dn; kind = $kind; security = (_parseAces $sdb) }
+  [ordered]@{ object_dn = $dn; kind = $kind; owner_sid = (_readOwner $sdb); security = (_parseAces $sdb) }
 }
 # Enumerate child objects under a container and tokenise each one's DACL.
 function _childAcls([string]$containerDn, [string]$filter, [string]$kind) {
@@ -240,9 +240,21 @@ function _childAcls([string]$containerDn, [string]$filter, [string]$kind) {
   foreach ($r in (_search $root $filter)) {
     $dn  = [string]$r.Properties['distinguishedname'][0]
     $sdb = if ($r.Properties['ntsecuritydescriptor'].Count) { [byte[]]$r.Properties['ntsecuritydescriptor'][0] } else { $null }
-    $out += [ordered]@{ object_dn = $dn; kind = $kind; security = (_parseAces $sdb) }
+    $out += [ordered]@{ object_dn = $dn; kind = $kind; owner_sid = (_readOwner $sdb); security = (_parseAces $sdb) }
   }
   ,$out
+}
+
+function _readOwner([byte[]]$sdBytes) {
+  # The security descriptor Owner (a SID) — a low-priv owner can rewrite the
+  # DACL to grant itself control (ESC4/ESC5 owner-based path, WI-019). Returns
+  # the owner SID string, or '' when the SD is absent/malformed/has no owner.
+  if (-not $sdBytes -or $sdBytes.Length -eq 0) { return '' }
+  try {
+    $sd = New-Object DirectoryServices.ActiveDirectorySecurity
+    $sd.SetSecurityDescriptorBinaryForm($sdBytes)
+    return [string]$sd.GetOwner([Security.Principal.SecurityIdentifier]).Value
+  } catch { return '' }
 }
 
 # The CA's own role permissions (ESC7) live in the registry "Security" REG_BINARY,
@@ -263,8 +275,9 @@ function _caSecurityAces([string]$caName) {
     if ($m -band 0x2)   { $rights += 'ManageCertificates' }  # CA_ACCESS_OFFICER
     if ($m -band 0x4)   { $rights += 'Auditor' }
     if ($m -band 0x8)   { $rights += 'Operator' }
-    if ($m -band 0x100) { $rights += 'Read' }
-    if ($m -band 0x200) { $rights += 'Enroll' }
+    if ($m -band 0x100)     { $rights += 'Read' }
+    if ($m -band 0x200)     { $rights += 'Enroll' }
+    if ($m -band 0x10000000){ $rights += 'GenericAll' }
     $type = if ($a.AceQualifier -eq 'AccessDenied') { 'Deny' } else { 'Allow' }
     $out += [ordered]@{
       trustee_sid  = [string]$a.SecurityIdentifier.Value
@@ -317,8 +330,10 @@ foreach ($r in (_search $enrollRoot '(objectClass=pKIEnrollmentService)')) {
     edit_flags     = (@($editFlags))
     interface_flags= (@($interfaceFlags))
     audit_filter   = $auditFilter
-    validity       = ''
-    roles          = @()
+    # Collector cannot yet read CA build/patch level statically (ESC15 / CVE-2024-49019).
+    # Emitting 'unknown' lets the detector degrade the ESC15 finding to MEDIUM; a
+    # future enhancement may populate this from the OS build.
+    ca_patch_state = 'unknown'
     disabled_extensions = (@($disabledExt))
   }
 }
@@ -332,6 +347,7 @@ foreach ($r in (_search $tmplRoot '(objectClass=pKICertificateTemplate)')) {
   $ef = if ($p['mspki-enrollment-flag'].Count) { [int]$p['mspki-enrollment-flag'][0] } else { 0 }
   $ekus = @(); foreach ($e in $p['pkiextendedkeyusage']) { $ekus += [string]$e }
   $pol  = @(); foreach ($o in $p['mspki-certificate-policy']) { $pol += [string]$o }
+  $csps = @(); foreach ($c in $p['pKICSP']) { $csps += [string]$c }
   $sdb  = if ($p['ntsecuritydescriptor'].Count) { [byte[]]$p['ntsecuritydescriptor'][0] } else { $null }
   $templates += [ordered]@{
     name              = [string]$p['cn'][0]
@@ -343,8 +359,10 @@ foreach ($r in (_search $tmplRoot '(objectClass=pKICertificateTemplate)')) {
     enrollment_flags  = (_decode $ef $ENROLL_FLAGS)
     min_key_size      = if ($p['mspki-minimal-key-size'].Count) { [int]$p['mspki-minimal-key-size'][0] } else { $null }
     issuance_policy_oids = (@($pol))
+    csp               = (($csps -join ', ').ToLower())
     security          = (_parseAces $sdb)   # template DACL → ACEs (ESC1/ESC4)
     acl_obtained      = ($null -ne $sdb)    # SD requested & obtained (per-template gap signal)
+    owner_sid         = (_readOwner $sdb)
   }
 }
 

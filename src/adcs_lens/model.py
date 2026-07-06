@@ -47,6 +47,20 @@ class CaKind(StrEnum):
     STANDALONE = "standalone"
 
 
+class CaPatchState(StrEnum):
+    """Whether the CA is patched for CVE-2024-49019 (EKUwu / ESC15).
+
+    The collector cannot yet read CA build/patch level statically, so it defaults
+    to UNKNOWN: ESC15 then reports MEDIUM with an explicit "confirm patch state"
+    caveat rather than a false HIGH on a patched estate. A future collector that
+    captures the CA's OS build / KB level can populate PATCHED or UNPATCHED.
+    """
+
+    UNKNOWN = "unknown"
+    PATCHED = "patched"
+    UNPATCHED = "unpatched"
+
+
 class CertKind(StrEnum):
     """Classification of a parsed certificate's role."""
 
@@ -208,13 +222,14 @@ class CertAuthority:
     edit_flags: frozenset[str]
     interface_flags: frozenset[str]
     audit_filter: int | None
-    validity: str
-    roles: frozenset[str]
     security: tuple[AceEntry, ...]
     certs: tuple[CertLifecycle, ...]
     # OIDs the CA strips from every issued cert (policy\DisableExtensionList).
     # Empty by default so pre-field exports read as "no gap" (no false ESC16).
     disabled_extensions: frozenset[str] = frozenset()
+    # Whether the CA is patched for CVE-2024-49019 (EKUwu / ESC15). Defaults to
+    # UNKNOWN so the ESC15 detector degrades honestly (see CaPatchState).
+    ca_patch_state: CaPatchState = CaPatchState.UNKNOWN
 
 
 @dataclass(frozen=True)
@@ -235,6 +250,15 @@ class CertTemplate:
     # True when the collector obtained this template's nTSecurityDescriptor.
     # Default True so pre-field exports read as "no gap" (no false signal).
     acl_obtained: bool = True
+    # The template's configured CSP / key algorithm (lower-cased provider name).
+    # Empty when the collector did not capture it; the weak-key detector then
+    # applies the RSA baseline (the common case) and notes the caveat. A template
+    # whose CSP indicates ECDSA is skipped (its min key size is a curve size).
+    csp: str = ""
+    # Security descriptor owner (normalized SID). Empty when not captured; the
+    # ESC4 detector then skips owner-based control (a known gap, not a false
+    # positive). A low-priv owner can rewrite the DACL, creating an ESC1 path.
+    owner_sid: str = ""
 
 
 @dataclass(frozen=True)
@@ -244,6 +268,10 @@ class PkiObjectAcl:
     object_dn: str
     kind: AclKind
     security: tuple[AceEntry, ...]
+    # Security descriptor owner (normalized SID). Empty when not captured; the
+    # ESC5 detector then skips owner-based control (a known gap, not a false
+    # positive). A low-priv owner can rewrite the object's DACL.
+    owner_sid: str = ""
 
 
 @dataclass(frozen=True)

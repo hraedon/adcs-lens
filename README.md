@@ -46,7 +46,7 @@ later plan), never from a standing connection.
 
 ## Scope
 
-**In scope (v0.x core):**
+**In scope (v1.0 core):**
 - **CA configuration** — `EDITF_*` policy flags, `IF_*` interface flags, CA role
   permissions, audit configuration (ESC6 / ESC7 / ESC11 surface).
 - **Certificate templates** — `msPKI-*` enrollment/name flags, EKUs,
@@ -91,7 +91,7 @@ later plan), never from a standing connection.
 - **Evidence-producing.** The output is an artifact an auditor or manager can
   read — findings prioritized by severity, each traceable to a source fact.
 
-## Intended workflow (not yet built — see `plans/`)
+## Workflow
 
 ```powershell
 # On the CA / a tier-0 admin box, export the PKI config (read-only):
@@ -139,18 +139,26 @@ adcs-lens diff  OLD NEW --exit-code       # non-zero on regressions (for schedul
 
 ## Status
 
-Core built (Plan 001 Phases 0, 1, 2, 3) with ESC1/2/3/4/5/6/7/8/9/10/11/13/14/15/16
-detectors, infrastructure cert/CRL-expiry checks, and crypto/operational hygiene
-detectors (weak signing algorithm, weak CA/template key size, CA audit
-configuration) — the statically-detectable ESC family (ESC12 has no established static prerequisite — see `docs/threat-model.md`) and statically-detectable hygiene rows the
-threat model marks. The collector — including the opt-in ESC10/ESC14 DC
-certificate-mapping passes — is validated against the live lab. Remaining: a live
-*positive* (vulnerable-config) validation for the newer detectors (ESC10/11/13/14
-were negative-validated live and positive-validated on the synthetic fixture).
-Stance-2 drift detection (`diff`) is built: it diffs the findings of two
-read-only exports and reports regressions / fixes / severity changes, with
-`--exit-code` for scheduled-scan gating — no live access. A threat-model ↔
-detector traceability test locks the design spine against drift.
+**v1.0** — the deterministic core is complete and tested. ESC1–ESC11, ESC13–ESC16
+detectors (ESC12 has no established static-detectability boundary — see
+`docs/threat-model.md`), infrastructure cert/CRL-expiry checks, and
+crypto/operational hygiene detectors (weak signing algorithm, weak CA/template
+key size, CA audit configuration) — the statically-detectable ESC family and
+hygiene rows the threat model marks. The collector — including the opt-in
+ESC10/ESC14 DC certificate-mapping passes — is validated against the live lab.
+
+Phase-1 honesty/precision work closes the false-positive and false-negative
+edges so the "full ESC family" claim never overclaims: ESC7 expands broad rights
+(GenericAll/FullControl) via an implication map so blanket CA control is not
+missed; ESC15 severity tracks CA patch state (HIGH unpatched / MEDIUM unknown /
+suppressed patched); the template weak-key detector is algorithm-aware (ECDSA
+templates skipped); ESC4/ESC5 model owner-based control (a low-priv owner can
+rewrite the DACL); and ESC8 distinguishes EPA allow/none/unknown in the finding
+detail. Stance-2 drift detection (`diff`) diffs the findings of two read-only
+exports and reports regressions / fixes / severity changes, with `--exit-code`
+for scheduled-scan gating — no live access. A threat-model ↔ detector
+traceability test locks the design spine against drift.
+
 Foundational docs:
 - [`docs/threat-model.md`](docs/threat-model.md) — the ESC + hygiene catalogue
   with the static-detectability boundary. **Start here.**

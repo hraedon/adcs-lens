@@ -77,7 +77,8 @@ CONSEQUENCES: dict[str, ConsequenceEntry] = {
         ),
         remediation=(
             "Remove delegated write, modify, or change-permissions rights from low-privilege "
-            "users on certificate templates."
+            "users on certificate templates, and reset ownership to a privileged account when a "
+            "low-privilege principal owns the template."
         ),
     ),
     "ESC5": ConsequenceEntry(
@@ -95,7 +96,8 @@ CONSEQUENCES: dict[str, ConsequenceEntry] = {
         ),
         remediation=(
             "Remove delegated control over NTAuthCertificates, CA objects, and the Public Key "
-            "Services, AIA, and CDP containers."
+            "Services, AIA, and CDP containers, and reset ownership to a privileged account when "
+            "a low-privilege principal owns the object."
         ),
     ),
     "ESC6": ConsequenceEntry(
@@ -221,11 +223,13 @@ CONSEQUENCES: dict[str, ConsequenceEntry] = {
         consequence=(
             "On a certificate authority that is not patched for CVE-2024-49019, the requester can "
             "inject arbitrary certificate usages such as Client Authentication into the request, "
-            "turning the template into an ESC1 or ESC3 escalation path."
+            "turning the template into an ESC1 or ESC3 escalation path. When CA patch state is "
+            "unknown the finding is reported at a reduced severity with a caveat to confirm the "
+            "patch; on a known-patched CA the EKUwu path is closed."
         ),
         remediation=(
-            "Patch the CA for CVE-2024-49019, upgrade the template to schema version 2 or later, "
-            "and restrict Enroll rights."
+            "Confirm the CA is patched for CVE-2024-49019, upgrade the template to schema "
+            "version 2 or later, and restrict Enroll rights."
         ),
     ),
     "ESC16": ConsequenceEntry(

@@ -20,6 +20,7 @@ from adcs_lens.model import (
     AceType,
     AclKind,
     CaKind,
+    CaPatchState,
     CertKind,
     CertTemplate,
     Crl,
@@ -516,21 +517,24 @@ def detect_esc3(estate: Estate) -> list[Finding]:
 def detect_esc4(estate: Estate) -> list[Finding]:
     """Flag templates a low-privilege principal can rewrite (a path to ESC1).
 
-    ESC4: a low-priv trustee holds an object-wide control right (GenericAll,
+    ESC4: a low-privilege trustee holds an object-wide control right (GenericAll,
     GenericWrite, WriteDacl, WriteOwner, or a *blanket* WriteProperty) on the
-    template. They can edit the template — e.g. turn on enrollee-supplied
-    subjects and add a client-auth EKU — converting it into ESC1. We flag the
-    standing control right; we never modify the template.
+    template, **or** a low-privilege principal *owns* the template (an owner can
+    rewrite the DACL to grant itself control). Either lets them edit the template
+    — e.g. turn on enrollee-supplied subjects and add a client-auth EKU —
+    converting it into ESC1. We flag the standing control right / ownership; we
+    never modify the template.
 
     Shares the ESC1 degradation: when template security was not collected the
     ESC1 detector emits the single ``TEMPLATE_ACL_NOT_EVALUATED`` note, so this
     returns nothing rather than duplicating it.
 
-    Scope: evaluates DACL control rights only. Owner-based control is not yet
-    modeled (the collector reads the DACL, not the owner). Property-*scoped*
-    WriteProperty is also not flagged — distinguishing a write that reaches
-    msPKI-Certificate-Name-Flag from a harmless one would need a property-set
-    GUID map; only blanket (all-property) WriteProperty is treated as control.
+    Scope: evaluates DACL control rights and owner-based control (WI-019).
+    Property-*scoped* WriteProperty is still not flagged — distinguishing a write
+    that reaches msPKI-Certificate-Name-Flag from a harmless one would need a
+    property-set GUID map; only blanket (all-property) WriteProperty is treated as
+    control. Owner-based control is skipped when the owner was not captured
+    (``owner_sid`` empty) — a known gap, never a false positive.
     """
     if not _template_security_collected(estate):
         return []
@@ -539,35 +543,54 @@ def detect_esc4(estate: Estate) -> list[Finding]:
         if not tmpl.acl_obtained:
             continue
         controllers = _low_priv_allow_aces(tmpl, _DANGEROUS_TEMPLATE_CONTROL)
-        if not controllers:
-            continue
-        who = ", ".join(sorted({a.trustee_name or a.trustee_sid for a in controllers}))
-        template_security = tmpl.security
-        rights = ", ".join(
-            sorted(
-                {
-                    r
-                    for a in controllers
-                    for r in a.rights
-                    if r.strip().lower() in _DANGEROUS_TEMPLATE_CONTROL
-                    and r.strip().lower() not in _blocked_rights(template_security, a.trustee_sid)
-                }
+        if controllers:
+            who = ", ".join(sorted({a.trustee_name or a.trustee_sid for a in controllers}))
+            template_security = tmpl.security
+            rights = ", ".join(
+                sorted(
+                    {
+                        r
+                        for a in controllers
+                        for r in a.rights
+                        if r.strip().lower() in _DANGEROUS_TEMPLATE_CONTROL
+                        and r.strip().lower()
+                        not in _blocked_rights(template_security, a.trustee_sid)
+                    }
+                )
             )
-        )
-        findings.append(
-            Finding(
-                check="ESC4",
-                severity=Severity.HIGH,
-                title="Template object is writable by a low-privilege principal",
-                subject=tmpl.display_name or tmpl.name,
-                detail=(
-                    f"{who} hold {rights} on the template and can rewrite it (e.g. "
-                    "enable enrollee-supplied subjects + a client-auth EKU) to create "
-                    "an ESC1 path. Remove the delegated control."
-                ),
-                source=f"template '{tmpl.name}': nTSecurityDescriptor DACL",
+            findings.append(
+                Finding(
+                    check="ESC4",
+                    severity=Severity.HIGH,
+                    title="Template object is writable by a low-privilege principal",
+                    subject=tmpl.display_name or tmpl.name,
+                    detail=(
+                        f"{who} hold {rights} on the template and can rewrite it (e.g. "
+                        "enable enrollee-supplied subjects + a client-auth EKU) to create "
+                        "an ESC1 path. Remove the delegated control."
+                    ),
+                    source=f"template '{tmpl.name}': nTSecurityDescriptor DACL",
+                )
             )
-        )
+        # Owner-based control (WI-019): a low-privilege owner can rewrite the
+        # DACL to grant itself control even with no control ACE, so it is an
+        # independent ESC4 path. Surfaced separately from the DACL finding.
+        if tmpl.owner_sid and is_low_priv_trustee(tmpl.owner_sid):
+            findings.append(
+                Finding(
+                    check="ESC4",
+                    severity=Severity.HIGH,
+                    title="Template is owned by a low-privilege principal",
+                    subject=tmpl.display_name or tmpl.name,
+                    detail=(
+                        f"The template owner is a low-privilege principal "
+                        f"({tmpl.owner_sid}). As the owner it can rewrite the template's "
+                        "DACL to grant itself control and then convert the template into an "
+                        "ESC1 path. Reset ownership to a privileged account (e.g. Domain Admins)."
+                    ),
+                    source=f"template '{tmpl.name}': nTSecurityDescriptor owner",
+                )
+            )
     return findings
 
 
@@ -577,15 +600,18 @@ def detect_esc5(estate: Estate) -> list[Finding]:
     ESC5: a low-priv trustee holds an object-wide control right (GenericAll,
     GenericWrite, WriteDacl, WriteOwner, or a *blanket* WriteProperty) on a
     Public Key Services object — NTAuthCertificates, a CA object, the AIA/CDP
-    containers, or a PKS container. Each grants a distinct escalation: writing
-    NTAuth publishes a rogue trusted CA; writing a CA object reconfigures
-    issuance; writing AIA/CDP tampers with chain/revocation. We flag the standing
-    control right; we never modify the object.
+    containers, or a PKS container — **or** a low-priv principal owns the object
+    (an owner can rewrite the DACL to grant itself control). Each grants a
+    distinct escalation: writing NTAuth publishes a rogue trusted CA; writing a
+    CA object reconfigures issuance; writing AIA/CDP tampers with chain/revocation.
+    We flag the standing control right / ownership; we never modify the object.
 
     Degrades to a note when the PKI-ACL pass was not collected (``pki-acls`` in
     ``skipped_passes``) so the absence of findings is not mistaken for a clean
     result. Property-*scoped* WriteProperty is not flagged (mirrors ESC4): only
-    blanket object-control rights are treated as control.
+    blanket object-control rights are treated as control. Owner-based control is
+    skipped when the owner was not captured (``owner_sid`` empty) — a known gap,
+    never a false positive.
     """
     if _PKI_ACLS_PASS in estate.manifest.skipped_passes:
         return [
@@ -604,37 +630,54 @@ def detect_esc5(estate: Estate) -> list[Finding]:
         ]
     findings: list[Finding] = []
     for obj in estate.acls:
-        controllers = _low_priv_allow_aces_in(obj.security, _DANGEROUS_OBJECT_CONTROL)
-        if not controllers:
-            continue
         severity, impact = _ESC5_IMPACT.get(
             obj.kind,
             (Severity.HIGH, "a Public Key Services object"),
         )
-        who = ", ".join(sorted({a.trustee_name or a.trustee_sid for a in controllers}))
-        rights = ", ".join(
-            sorted(
-                {
-                    r
-                    for a in controllers
-                    for r in a.rights
-                    if r.strip().lower() in _DANGEROUS_OBJECT_CONTROL
-                    and r.strip().lower() not in _blocked_rights(obj.security, a.trustee_sid)
-                }
+        controllers = _low_priv_allow_aces_in(obj.security, _DANGEROUS_OBJECT_CONTROL)
+        if controllers:
+            who = ", ".join(sorted({a.trustee_name or a.trustee_sid for a in controllers}))
+            rights = ", ".join(
+                sorted(
+                    {
+                        r
+                        for a in controllers
+                        for r in a.rights
+                        if r.strip().lower() in _DANGEROUS_OBJECT_CONTROL
+                        and r.strip().lower() not in _blocked_rights(obj.security, a.trustee_sid)
+                    }
+                )
             )
-        )
-        findings.append(
-            Finding(
-                check="ESC5",
-                severity=severity,
-                title="PKI object is writable by a low-privilege principal",
-                subject=obj.object_dn or obj.kind.value,
-                detail=(
-                    f"{who} hold {rights} on {impact}. Remove the delegated control."
-                ),
-                source=f"{obj.object_dn or obj.kind.value}: nTSecurityDescriptor DACL",
+            findings.append(
+                Finding(
+                    check="ESC5",
+                    severity=severity,
+                    title="PKI object is writable by a low-privilege principal",
+                    subject=obj.object_dn or obj.kind.value,
+                    detail=(
+                        f"{who} hold {rights} on {impact}. Remove the delegated control."
+                    ),
+                    source=f"{obj.object_dn or obj.kind.value}: nTSecurityDescriptor DACL",
+                )
             )
-        )
+        # Owner-based control (WI-019): a low-privilege owner can rewrite the
+        # DACL to grant itself control even with no control ACE.
+        if obj.owner_sid and is_low_priv_trustee(obj.owner_sid):
+            findings.append(
+                Finding(
+                    check="ESC5",
+                    severity=severity,
+                    title="PKI object is owned by a low-privilege principal",
+                    subject=obj.object_dn or obj.kind.value,
+                    detail=(
+                        f"The owner of {impact} is a low-privilege principal "
+                        f"({obj.owner_sid}). As the owner it can rewrite the object's "
+                        "DACL to grant itself control. Reset ownership to a privileged "
+                        "account (e.g. Domain Admins)."
+                    ),
+                    source=f"{obj.object_dn or obj.kind.value}: nTSecurityDescriptor owner",
+                )
+            )
     return findings
 
 
@@ -645,7 +688,9 @@ def detect_esc7(estate: Estate) -> list[Finding]:
     turn on EDITF_ATTRIBUTESUBJECTALTNAME2 → ESC6, or publish a vulnerable
     template) or **Manage Certificates** (can approve pending requests / revoke).
     Read from the CA's ``CA\\Security`` registry descriptor; we flag the standing
-    right, we never exercise it.
+    right, we never exercise it. Broad rights (GenericAll / FullControl) that
+    imply a CA role are recognized via the ``_COVERS`` implication map, so a
+    low-privilege trustee granted blanket CA control is not silently missed.
 
     Degrades to a note when the CA security descriptor was not collected.
     """
@@ -673,10 +718,18 @@ def detect_esc7(estate: Estate) -> list[Finding]:
             if not is_low_priv_trustee(ace.trustee_sid):
                 continue
             blocked = _blocked_rights(ca.security, ace.trustee_sid)
-            manage = ({r.strip().lower() for r in ace.rights} & {
-                _CA_MANAGE_CA,
-                _CA_MANAGE_CERTS,
-            }) - blocked
+            # Expand broad rights via _COVERS so GenericAll / FullControl (which
+            # cover ManageCA / ManageCertificates) are not silently missed — a
+            # raw intersection of ace.rights with the two role tokens would skip
+            # them entirely, a domain-compromise-class false negative.
+            manage: set[str] = set()
+            for r in ace.rights:
+                token = r.strip().lower()
+                manage |= _COVERS.get(token, frozenset({token})) & {
+                    _CA_MANAGE_CA,
+                    _CA_MANAGE_CERTS,
+                }
+            manage -= blocked
             if not manage:
                 continue
             _, rights = by_trustee.setdefault(ace.trustee_sid, (ace.trustee_name, set()))
@@ -753,7 +806,18 @@ def detect_esc8(estate: Estate) -> list[Finding]:
         if http_open:
             conditions.append("it is reachable over cleartext HTTP")
         if not epa_required:
-            conditions.append(f"Extended Protection is '{ep.epa.value}' (not Require)")
+            if ep.epa is EpaPolicy.ALLOW:
+                conditions.append(
+                    "Extended Protection is 'allow' (honored only if the client offers "
+                    "a channel binding, so a relay via a client that does not send one "
+                    "is not mitigated)"
+                )
+            elif ep.epa is EpaPolicy.NONE:
+                conditions.append("Extended Protection is 'none' (channel binding not honored)")
+            else:  # UNKNOWN
+                conditions.append(
+                    "Extended Protection state is unknown (treated as not required)"
+                )
         explicit_ntlm = "ntlm" in ep.auth_providers
         # Cleartext HTTP or an explicit NTLM provider is the textbook relay case;
         # an HTTPS-only Negotiate endpoint missing EPA is weaker (MEDIUM).
@@ -1241,6 +1305,30 @@ def detect_esc13(estate: Estate) -> list[Finding]:
     return findings
 
 
+def _worst_ca_patch_state(estate: Estate) -> CaPatchState:
+    """The worst (most-vulnerable) patch state among issuing CAs.
+
+    A v1 template is exploitable via any unpatched issuing CA, so ESC15 keys on
+    the worst case: if any issuing CA is UNPATCHED the finding is HIGH; if all are
+    PATCHED the EKUwu path is closed; otherwise (some UNKNOWN, none unpatched) it
+    is MEDIUM with an explicit "confirm patch state" caveat.
+
+    Offline root CAs are excluded (mirrors ESC11/ESC16): a root never issues
+    end-entity certificates, so its patch state is irrelevant to whether a v1
+    template is exploitable — counting an unpatched root would falsely escalate
+    ESC15 on a patched issuing CA.
+    """
+    issuing = [ca for ca in estate.cas if ca.kind is not CaKind.ROOT]
+    if not issuing:
+        return CaPatchState.UNKNOWN
+    states = {ca.ca_patch_state for ca in issuing}
+    if CaPatchState.UNPATCHED in states:
+        return CaPatchState.UNPATCHED
+    if CaPatchState.UNKNOWN in states:
+        return CaPatchState.UNKNOWN
+    return CaPatchState.PATCHED
+
+
 def detect_esc15(estate: Estate) -> list[Finding]:
     """Flag schema v1 templates enrollable by low-priv principals (EKUwu).
 
@@ -1250,14 +1338,21 @@ def detect_esc15(estate: Estate) -> list[Finding]:
     request — e.g. Client Authentication (→ domain auth, ESC1-like) or Certificate
     Request Agent (→ enroll-on-behalf-of, ESC3-like). Any v1 template a low-priv
     principal can enroll in is therefore an escalation primitive, regardless of
-    the template's own EKUs. We flag the enabling config (v1 + low-priv enroll, no
-    manager approval); exploitability also requires an unpatched CA, which the
-    finding flags as a thing to confirm (we do not read CA patch state).
+    the template's own EKUs.
+
+    Patch-state aware (WI-027): the collector cannot yet read CA build/patch
+    level, so it defaults to UNKNOWN. On an UNKNOWN-patch estate the finding is
+    MEDIUM with an explicit "confirm the CA is patched" caveat (not a false HIGH
+    on a patched estate); on a known-UNPATCHED CA it is HIGH; on a known-PATCHED
+    CA the EKUwu path is closed and no finding is emitted.
 
     Degrades like ESC1/2/3/4: when template security descriptors were not
     collected, ESC1 emits the single estate-level note, so this returns nothing.
     """
     if not _template_security_collected(estate):
+        return []
+    patch_state = _worst_ca_patch_state(estate)
+    if patch_state is CaPatchState.PATCHED:
         return []
     findings: list[Finding] = []
     for tmpl in estate.templates:
@@ -1271,21 +1366,33 @@ def detect_esc15(estate: Estate) -> list[Finding]:
         if not enrollers:
             continue
         who = ", ".join(sorted({a.trustee_name or a.trustee_sid for a in enrollers}))
+        if patch_state is CaPatchState.UNPATCHED:
+            severity = Severity.HIGH
+            patch_note = (
+                "The CA is not patched for CVE-2024-49019, so the requester can inject "
+                "application policies (EKUs) such as Client Authentication or Certificate "
+                "Request Agent into the request, turning this into an ESC1/ESC3-style "
+                "escalation regardless of the template's own EKUs."
+            )
+        else:  # UNKNOWN — the common case until the collector captures patch state
+            severity = Severity.MEDIUM
+            patch_note = (
+                "CA patch state is unknown. If the CA is not patched for CVE-2024-49019 "
+                "(November 2024), the requester can inject application policies (EKUs) "
+                "such as Client Authentication or Certificate Request Agent into the "
+                "request, turning this into an ESC1/ESC3-style escalation regardless of "
+                "the template's own EKUs. Confirm the CA is patched."
+            )
         findings.append(
             Finding(
                 check="ESC15",
-                severity=Severity.HIGH,
+                severity=severity,
                 title="Schema v1 template enrollable by low-priv (EKUwu / CVE-2024-49019)",
                 subject=tmpl.display_name or tmpl.name,
                 detail=(
                     f"Enrollable by {who}; this is a schema version 1 template with no "
-                    "manager approval. On a CA missing the November 2024 fix for "
-                    "CVE-2024-49019, the requester can inject application policies (EKUs) "
-                    "such as Client Authentication or Certificate Request Agent into the "
-                    "request, turning this into an ESC1/ESC3-style escalation regardless of "
-                    "the template's own EKUs. Confirm the CA is patched; upgrade the "
-                    "template to schema v2+, require manager approval, or restrict enroll "
-                    "rights."
+                    f"manager approval. {patch_note} Upgrade the template to schema v2+, "
+                    "require manager approval, or restrict enroll rights."
                 ),
                 source=f"template '{tmpl.name}' (oid {tmpl.oid}): schema_version=1 + enroll ACL",
             )
@@ -1490,6 +1597,21 @@ def detect_weak_signing(estate: Estate) -> list[Finding]:
     return findings
 
 
+def _template_uses_ecdsa(tmpl: CertTemplate) -> bool:
+    """True when the template's CSP or key size indicates an EC (non-RSA) algorithm.
+
+    ``msPKI-Minimal-Key-Size`` is RSA-oriented (bits). An ECDSA template
+    legitimately carries a smaller minimum — the curve size (256/384/521 for
+    P-256/P-384/P-521) — so the RSA 2048-bit baseline must not be applied to it.
+    We detect ECDSA from the captured CSP when available, and from the key size
+    alone otherwise: 256/384/521 are never valid RSA minimums, so a template with
+    one of those sizes is unambiguously an EC template (WI-025).
+    """
+    if "ecdsa" in tmpl.csp or "ecdh" in tmpl.csp:
+        return True
+    return tmpl.min_key_size in (256, 384, 521)
+
+
 def detect_weak_key_size(estate: Estate) -> list[Finding]:
     """Flag weak RSA key lengths in CA certificates and certificate templates.
 
@@ -1499,13 +1621,11 @@ def detect_weak_key_size(estate: Estate) -> list[Finding]:
     check always runs regardless of whether DER certs were parsed.
 
     Only RSA keys are subject to the 2048-bit baseline — ECDSA keys legitimately
-    use 256/384/521-bit sizes, so non-RSA CA certs are skipped.
-
-    The template half applies the same 2048-bit RSA baseline to every template's
-    ``msPKI-Minimal-Key-Size``. That attribute is RSA-oriented; a template
-    configured for ECDSA-only enrollment may legitimately carry a smaller minimum
-    and would surface here for manual review until the collector captures the
-    template CSP/algorithm (tracked as a model gap).
+    use 256/384/521-bit sizes, so non-RSA CA certs are skipped and ECDSA templates
+    (detected via the captured CSP or an unambiguous EC curve size) are skipped
+    (WI-025). A template whose algorithm is genuinely unknown and whose key size
+    is not an EC curve size is checked against the RSA baseline — the common case,
+    since RSA dominates AD CS templates.
 
     Degrades cleanly: the CA certificate half returns nothing when
     ``certs_parsed`` is False, mirroring other lifecycle detectors.
@@ -1548,6 +1668,8 @@ def detect_weak_key_size(estate: Estate) -> list[Finding]:
     for tmpl in estate.templates:
         bits = tmpl.min_key_size
         if bits is None or bits >= 2048:
+            continue
+        if _template_uses_ecdsa(tmpl):
             continue
         if bits < 1024:
             severity = Severity.HIGH

@@ -30,6 +30,7 @@ from adcs_lens.model import (
     AceType,
     AclKind,
     CaKind,
+    CaPatchState,
     CertAuthority,
     CertKind,
     CertLifecycle,
@@ -79,6 +80,8 @@ def _template(
     acl_obtained: bool = True,
     schema_version: int = 2,
     min_key_size: int = 2048,
+    csp: str = "",
+    owner_sid: str = "",
 ) -> CertTemplate:
     return CertTemplate(
         name=name,
@@ -93,6 +96,8 @@ def _template(
         security=security,
         published_by=(),
         acl_obtained=acl_obtained,
+        csp=csp,
+        owner_sid=owner_sid,
     )
 
 
@@ -106,6 +111,7 @@ def _ca(
     certs: tuple[CertLifecycle, ...] = (),
     security: tuple[AceEntry, ...] = (),
     disabled_extensions: tuple[str, ...] = (),
+    ca_patch_state: CaPatchState = CaPatchState.UNKNOWN,
 ) -> CertAuthority:
     return CertAuthority(
         name=name,
@@ -115,11 +121,10 @@ def _ca(
         edit_flags=frozenset(edit_flags),
         interface_flags=frozenset(interface_flags),
         audit_filter=audit_filter,
-        validity="",
-        roles=frozenset(),
         security=security,
         certs=certs,
         disabled_extensions=frozenset(disabled_extensions),
+        ca_patch_state=ca_patch_state,
     )
 
 
@@ -160,8 +165,9 @@ def _pki_acl(
     *,
     dn: str = "CN=Obj,CN=Public Key Services,CN=Services,CN=Configuration,DC=x",
     security: tuple[AceEntry, ...] = (),
+    owner_sid: str = "",
 ) -> PkiObjectAcl:
-    return PkiObjectAcl(object_dn=dn, kind=kind, security=security)
+    return PkiObjectAcl(object_dn=dn, kind=kind, security=security, owner_sid=owner_sid)
 
 
 def _endpoint(
@@ -432,6 +438,29 @@ def test_esc4_silent_when_template_security_not_collected() -> None:
     ) == []
 
 
+def test_esc4_owner_based_control_flagged() -> None:
+    # A low-priv OWNER can rewrite the DACL to grant itself control even with no
+    # control ACE — an ESC4 path the DACL-only check misses (WI-019).
+    tmpl = _template("OwnerControlled", security=(), owner_sid=LOW_PRIV_SID)
+    findings = detect_esc4(_estate(templates=(tmpl,)))
+    assert len(findings) == 1
+    assert findings[0].check == "ESC4"
+    assert findings[0].severity == Severity.HIGH
+    assert "owner" in findings[0].detail.lower()
+
+
+def test_esc4_owner_high_priv_not_flagged() -> None:
+    tmpl = _template("AdminOwned", security=(), owner_sid=HIGH_PRIV_SID)
+    assert detect_esc4(_estate(templates=(tmpl,))) == []
+
+
+def test_esc4_owner_empty_not_flagged() -> None:
+    # No owner captured -> owner-based control is skipped (a known gap, not a
+    # false positive).
+    tmpl = _template("NoOwner", security=(), owner_sid="")
+    assert detect_esc4(_estate(templates=(tmpl,))) == []
+
+
 # --- ESC7 -----------------------------------------------------------------
 
 
@@ -474,6 +503,32 @@ def test_esc7_aggregates_both_roles_per_trustee_to_one_critical() -> None:
     findings = detect_esc7(_estate(cas=(ca,)))
     assert len(findings) == 1
     assert findings[0].severity == Severity.CRITICAL
+
+
+def test_esc7_genericall_implies_manage_ca() -> None:
+    # GenericAll covers ManageCA via _COVERS — a low-priv trustee granted blanket
+    # CA control must be flagged CRITICAL, not silently missed (the raw rights
+    # intersection would skip GenericAll entirely).
+    ca = _ca("IssuingCA", security=(_enroll_ace(right="GenericAll"),))
+    findings = detect_esc7(_estate(cas=(ca,)))
+    assert len(findings) == 1
+    assert findings[0].check == "ESC7"
+    assert findings[0].severity == Severity.CRITICAL
+
+
+def test_esc7_fullcontrol_implies_manage_ca() -> None:
+    ca = _ca("IssuingCA", security=(_enroll_ace(right="FullControl"),))
+    findings = detect_esc7(_estate(cas=(ca,)))
+    assert len(findings) == 1
+    assert findings[0].severity == Severity.CRITICAL
+
+
+def test_esc7_all_extended_rights_does_not_imply_manage_ca() -> None:
+    # AllExtendedRights covers only Enroll/AutoEnroll (extended rights), NOT the
+    # CA role access-mask bits ManageCA/ManageCertificates (per Windows access-
+    # mask semantics) — so it must not fire ESC7.
+    ca = _ca("IssuingCA", security=(_enroll_ace(right="AllExtendedRights"),))
+    assert detect_esc7(_estate(cas=(ca,))) == []
 
 
 def test_esc7_degrades_when_ca_security_not_collected() -> None:
@@ -1235,11 +1290,12 @@ def test_esc13_not_flagged_when_oid_absent_from_estate() -> None:
 # --- ESC15 ----------------------------------------------------------------
 
 
-def test_esc15_flagged_for_v1_template_low_priv_enroll() -> None:
+def test_esc15_high_when_ca_unpatched() -> None:
     from adcs_lens.detection import detect_esc15
 
     # A v1 template with no auth EKU and no supplies-subject is still ESC15: the
-    # requester injects the application policy under EKUwu.
+    # requester injects the application policy under EKUwu. On a known-unpatched
+    # CA the finding is HIGH.
     tmpl = _template(
         "WebServerV1",
         schema_version=1,
@@ -1247,12 +1303,57 @@ def test_esc15_flagged_for_v1_template_low_priv_enroll() -> None:
         name_flags=(),
         security=(_enroll_ace(),),
     )
-    findings = detect_esc15(_estate(templates=(tmpl,)))
+    findings = detect_esc15(
+        _estate(cas=(_ca("CA", ca_patch_state=CaPatchState.UNPATCHED),), templates=(tmpl,))
+    )
     assert len(findings) == 1
     assert findings[0].check == "ESC15"
     assert findings[0].severity == Severity.HIGH
     assert findings[0].subject == "WebServerV1"
     assert "CVE-2024-49019" in findings[0].detail
+
+
+def test_esc15_medium_when_patch_state_unknown() -> None:
+    from adcs_lens.detection import detect_esc15
+
+    # When CA patch state is unknown (the common case — the collector cannot yet
+    # read it), ESC15 is MEDIUM with an explicit "confirm patch state" caveat,
+    # not a false HIGH on a patched estate (WI-027).
+    tmpl = _template("V1Unknown", schema_version=1, security=(_enroll_ace(),))
+    findings = detect_esc15(_estate(cas=(_ca("CA"),), templates=(tmpl,)))
+    assert len(findings) == 1
+    assert findings[0].check == "ESC15"
+    assert findings[0].severity == Severity.MEDIUM
+    assert "patch state is unknown" in findings[0].detail.lower()
+
+
+def test_esc15_suppressed_when_ca_patched() -> None:
+    from adcs_lens.detection import detect_esc15
+
+    # On a known-patched CA the EKUwu path is closed — no finding (WI-027).
+    tmpl = _template("V1Patched", schema_version=1, security=(_enroll_ace(),))
+    assert (
+        detect_esc15(
+            _estate(cas=(_ca("CA", ca_patch_state=CaPatchState.PATCHED),), templates=(tmpl,))
+        )
+        == []
+    )
+
+
+def test_esc15_ignores_offline_root_patch_state() -> None:
+    from adcs_lens.detection import detect_esc15
+
+    # An unpatched offline ROOT must not escalate ESC15 when the issuing CA is
+    # patched — the root never issues end-entity certs (mirrors ESC11/ESC16).
+    tmpl = _template("V1", schema_version=1, security=(_enroll_ace(),))
+    estate = _estate(
+        cas=(
+            _ca("Root", kind=CaKind.ROOT, ca_patch_state=CaPatchState.UNPATCHED),
+            _ca("Issuing", ca_patch_state=CaPatchState.PATCHED),
+        ),
+        templates=(tmpl,),
+    )
+    assert detect_esc15(estate) == []
 
 
 def test_esc15_not_flagged_for_v2_template() -> None:
@@ -1350,6 +1451,30 @@ def test_esc8_https_only_no_epa_negotiate_is_medium() -> None:
     findings = detect_esc8(estate)
     assert len(findings) == 1
     assert findings[0].severity == Severity.MEDIUM
+
+
+def test_esc8_epa_allow_distinct_from_none_in_detail() -> None:
+    # WI-035: EPA 'allow' (honored only if the client offers it), 'none' (not
+    # honored), and 'unknown' are all flagged, but the detail distinguishes the
+    # risk level so an operator can prioritize.
+    for epa, needle in (
+        (EpaPolicy.ALLOW, "allow"),
+        (EpaPolicy.NONE, "none"),
+        (EpaPolicy.UNKNOWN, "unknown"),
+    ):
+        estate = _estate(
+            endpoints=(
+                _endpoint(
+                    transports=("https",),
+                    ssl_required=True,
+                    auth_providers=("negotiate",),
+                    epa=epa,
+                ),
+            )
+        )
+        findings = detect_esc8(estate)
+        assert len(findings) == 1
+        assert needle in findings[0].detail.lower()
 
 
 def test_esc8_https_only_explicit_ntlm_no_epa_is_high() -> None:
@@ -1517,6 +1642,30 @@ def test_esc5_subject_falls_back_to_kind_when_dn_empty() -> None:
     findings = detect_esc5(estate)
     assert len(findings) == 1
     assert findings[0].subject == AclKind.NTAUTH.value
+
+
+def test_esc5_owner_based_control_flagged() -> None:
+    # A low-priv OWNER of an NTAuth object can rewrite the DACL to grant itself
+    # control — an ESC5 path the DACL-only check misses (WI-019). NTAuth is
+    # CRITICAL (full-trust primitive).
+    acl = _pki_acl(AclKind.NTAUTH, security=(), owner_sid=LOW_PRIV_SID)
+    findings = detect_esc5(_estate(acls=(acl,)))
+    assert len(findings) == 1
+    assert findings[0].check == "ESC5"
+    assert findings[0].severity == Severity.CRITICAL
+    assert "owner" in findings[0].detail.lower()
+
+
+def test_esc5_owner_high_priv_not_flagged() -> None:
+    acl = _pki_acl(AclKind.AIA, security=(), owner_sid=HIGH_PRIV_SID)
+    assert detect_esc5(_estate(acls=(acl,))) == []
+
+
+def test_esc5_owner_empty_not_flagged() -> None:
+    # No owner captured -> owner-based control is skipped (a known gap, not a
+    # false positive).
+    acl = _pki_acl(AclKind.AIA, security=(), owner_sid="")
+    assert detect_esc5(_estate(acls=(acl,))) == []
 
 
 def test_run_all_includes_esc5() -> None:
@@ -1798,6 +1947,31 @@ def test_weak_template_key_size_medium_1024() -> None:
 
 def test_weak_template_key_size_clean_at_2048() -> None:
     assert detect_weak_key_size(_estate(templates=(_template("OK", min_key_size=2048),))) == []
+
+
+def test_weak_template_key_size_skips_ecdsa_by_csp() -> None:
+    # An ECDSA template (CSP indicates EC) with a P-256 curve size (256) must NOT
+    # fire WEAK_TEMPLATE_KEY_SIZE — 256 is a curve size, not an RSA bit length
+    # (WI-025).
+    tmpl = _template("Ecdsa", min_key_size=256, csp="ECDSA Key Storage Provider")
+    assert detect_weak_key_size(_estate(templates=(tmpl,))) == []
+
+
+def test_weak_template_key_size_skips_ecdsa_by_curve_size() -> None:
+    # Even without a captured CSP, a min_key_size of 256/384/521 is unambiguously
+    # an EC curve size (never a valid RSA minimum), so the RSA baseline is skipped.
+    for bits in (256, 384, 521):
+        tmpl = _template(f"EC{bits}", min_key_size=bits)
+        assert detect_weak_key_size(_estate(templates=(tmpl,))) == [], f"{bits}-bit flagged"
+
+
+def test_weak_template_key_size_rsa_1024_still_flagged() -> None:
+    # A genuine RSA-1024 template is still flagged (the algorithm-aware skip must
+    # not weaken the RSA check).
+    tmpl = _template("Rsa1024", min_key_size=1024)
+    findings = detect_weak_key_size(_estate(templates=(tmpl,)))
+    assert len(findings) == 1
+    assert findings[0].check == "WEAK_TEMPLATE_KEY_SIZE"
 
 
 # --- hygiene: audit configuration ------------------------------------------

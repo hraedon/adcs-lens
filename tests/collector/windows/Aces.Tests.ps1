@@ -17,6 +17,11 @@ BeforeAll {
         foreach ($r in $rules) { $sd.AddAccessRule($r) }
         $sd.GetSecurityDescriptorBinaryForm()
     }
+    function New-SdWithOwner([string]$sidStr) {
+        $sd = New-Object System.DirectoryServices.ActiveDirectorySecurity
+        $sd.SetOwner((New-Object System.Security.Principal.SecurityIdentifier($sidStr)))
+        $sd.GetSecurityDescriptorBinaryForm()
+    }
     function Rule(
         [string]$sidStr,
         [System.DirectoryServices.ActiveDirectoryRights]$rights,
@@ -61,5 +66,17 @@ Describe '_parseAces (Windows / System.DirectoryServices)' {
 
     It 'returns an empty result for an empty descriptor' {
         ((_parseAces ([byte[]]@())) -join ',') | Should -Be ''
+    }
+}
+
+Describe '_readOwner (Windows / System.DirectoryServices)' {
+    It 'returns the owner SID from a synthetic security descriptor' {
+        $bytes = New-SdWithOwner $TEST_SID
+        _readOwner $bytes | Should -Be $TEST_SID
+    }
+
+    It 'returns empty for null or empty input' {
+        _readOwner $null | Should -Be ''
+        _readOwner ([byte[]]@()) | Should -Be ''
     }
 }

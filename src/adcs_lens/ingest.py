@@ -23,6 +23,7 @@ from adcs_lens.model import (
     AceType,
     AclKind,
     CaKind,
+    CaPatchState,
     CertAuthority,
     CertKind,
     CertLifecycle,
@@ -256,12 +257,16 @@ def ingest(export_dir: str | Path) -> Estate:
                 edit_flags=frozenset(_coerce_str(f) for f in ca.get("edit_flags", [])),
                 interface_flags=frozenset(_coerce_str(f) for f in ca.get("interface_flags", [])),
                 audit_filter=_coerce_int(ca.get("audit_filter"), "CA AuditFilter"),
-                validity=_coerce_str(ca.get("validity", "")),
-                roles=frozenset(_coerce_str(r) for r in ca.get("roles", [])),
                 security=_aces(ca_security.get(name)),
                 certs=tuple(cert_by_ca.get(name, [])),
                 disabled_extensions=frozenset(
                     _coerce_str(o) for o in ca.get("disabled_extensions", [])
+                ),
+                ca_patch_state=_kind(
+                    ca.get("ca_patch_state", "unknown"),
+                    CaPatchState,
+                    "CA patch state",
+                    default="unknown",
                 ),
             )
         )
@@ -305,6 +310,7 @@ def ingest(export_dir: str | Path) -> Estate:
             object_dn=_coerce_str(a.get("object_dn", "")),
             kind=_kind(a.get("kind", ""), AclKind, "PKI ACL kind", default="pks_container"),
             security=_aces(a.get("security")),
+            owner_sid=normalize_sid(_coerce_str(a.get("owner_sid", ""))),
         )
         for a in acls_data
     )
@@ -412,4 +418,6 @@ def _template(
         security=_aces(t.get("security")),
         published_by=published_by,
         acl_obtained=acl_obtained,
+        csp=_coerce_str(t.get("csp", "")).lower(),
+        owner_sid=normalize_sid(_coerce_str(t.get("owner_sid", ""))),
     )

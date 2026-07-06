@@ -20,7 +20,7 @@ def test_manifest_and_counts(json_export: Path) -> None:
     # hyphenated pass name the detectors actually gate on (esc10-dc-registry).
     assert "esc10-dc-registry" not in estate.manifest.skipped_passes
     assert len(estate.cas) == 2
-    assert len(estate.templates) == 3
+    assert len(estate.templates) == 5
     assert len(estate.dcs) == 2
 
 
@@ -264,16 +264,20 @@ def test_esc8_detected_end_to_end(json_export: Path) -> None:
 
 
 def test_esc5_detected_end_to_end(json_export: Path) -> None:
-    # The fixture carries a benign scoped-WriteProperty NTAuth ACE (no finding)
-    # and a low-priv WriteDacl on the PKS container (ESC5). Exercise the full
-    # ingest -> PkiObjectAcl -> detect_esc5 pipeline, not just hand-built objects.
+    # The fixture carries a benign scoped-WriteProperty NTAuth ACE (no finding), a
+    # low-priv WriteDacl on the PKS container (ESC5 via DACL control), and an AIA
+    # container owned by a low-priv principal (ESC5 via owner-based control,
+    # WI-019). Exercise the full ingest -> PkiObjectAcl -> detect_esc5 pipeline.
     from adcs_lens.detection import run_all
     estate = ingest(json_export)
-    assert len(estate.acls) == 2
+    assert len(estate.acls) == 3
     esc5 = [f for f in run_all(estate) if f.check == "ESC5"]
-    assert len(esc5) == 1
-    assert esc5[0].severity == Severity.HIGH
-    assert "Public Key Services" in esc5[0].subject
+    assert len(esc5) == 2
+    assert all(f.severity == Severity.HIGH for f in esc5)
+    # The DACL-control finding on the PKS container.
+    assert any("Public Key Services" in f.subject for f in esc5)
+    # The owner-based finding on the AIA container (WI-019).
+    assert any("AIA" in f.subject for f in esc5)
     # The pass ran, so there must be no degrade note.
     assert all(f.check != "PKI_ACL_NOT_EVALUATED" for f in run_all(estate))
 
