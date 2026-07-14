@@ -151,10 +151,14 @@ Phase-1 honesty/precision work closes the false-positive and false-negative
 edges so the "full ESC family" claim never overclaims: ESC7 expands broad rights
 (GenericAll/FullControl) via an implication map so blanket CA control is not
 missed; ESC15 severity tracks CA patch state (HIGH unpatched / MEDIUM unknown /
-suppressed patched); the template weak-key detector is algorithm-aware (ECDSA
-templates skipped); ESC4/ESC5 model owner-based control (a low-priv owner can
-rewrite the DACL); and ESC8 distinguishes EPA allow/none/unknown in the finding
-detail. Stance-2 drift detection (`diff`) diffs the findings of two read-only
+suppressed patched — the collector emits `unknown` today, pending a future
+OS-build signal, so a real estate reports MEDIUM with a "confirm patch state"
+caveat rather than a false HIGH); the template weak-key detector is
+algorithm-aware (ECDSA templates skipped); ESC4/ESC5 model owner-based control
+(a low-priv owner can rewrite the DACL); and ESC8 distinguishes EPA
+allow/none/unknown in the finding detail. ESC1–ESC5, ESC7, ESC13, and ESC15
+match ACLs on the trustee SID directly — nested-group membership is not
+expanded, surfaced as a coverage note in `doctor` output. Stance-2 drift detection (`diff`) diffs the findings of two read-only
 exports and reports regressions / fixes / severity changes, with `--exit-code`
 for scheduled-scan gating — no live access. A threat-model ↔ detector
 traceability test locks the design spine against drift.

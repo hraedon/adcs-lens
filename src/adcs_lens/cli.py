@@ -23,8 +23,8 @@ from adcs_lens.display import (
     render_sarif,
     render_text,
 )
-from adcs_lens.ingest import IngestError, ingest
-from adcs_lens.model import SEVERITY_RANK, Severity
+from adcs_lens.ingest import IngestError, collector_compat_warning, ingest
+from adcs_lens.model import SEVERITY_RANK, Estate, Severity
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -56,7 +56,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--warn-days",
         type=int,
         default=90,
-        help="Flag CA certs/CRLs within this many days of expiry (default: 90).",
+        help=(
+            "Flag CA certificates within this many days of expiry (default: 90). "
+            "CRLs use a proportional early-warning window of their own validity period."
+        ),
     )
     p_doctor.add_argument(
         "--severity",
@@ -80,7 +83,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--warn-days",
         type=int,
         default=90,
-        help="Flag CA certs/CRLs within this many days of expiry (default: 90).",
+        help=(
+            "Flag CA certificates within this many days of expiry (default: 90). "
+            "CRLs use a proportional early-warning window of their own validity period."
+        ),
     )
     p_diff.add_argument(
         "--exit-code",
@@ -95,8 +101,16 @@ def _redact_none(s: str) -> str:
     return s if s not in ("", "None") else "?"
 
 
+def _compat_warn(estate: Estate) -> None:
+    """Warn on stderr when the collector predates the core's minimum (WI-031)."""
+    msg = collector_compat_warning(estate.manifest)
+    if msg is not None:
+        print(f"warning: {msg}", file=sys.stderr)
+
+
 def _cmd_ingest(export_dir: str) -> int:
     estate = ingest(export_dir)
+    _compat_warn(estate)
     m = estate.manifest
     print(f"Ingested export from {_redact_none(m.host)} ({_redact_none(m.domain)})")
     print(
@@ -123,7 +137,9 @@ def _cmd_doctor(
 ) -> int:
     min_rank = SEVERITY_RANK[Severity(severity)]
 
-    all_findings = run_all(ingest(export_dir), warn_days=warn_days)
+    estate = ingest(export_dir)
+    _compat_warn(estate)
+    all_findings = run_all(estate, warn_days=warn_days)
     # Lower rank == worse; keep findings at or above the requested floor.
     findings = [f for f in all_findings if SEVERITY_RANK[f.severity] <= min_rank]
 
@@ -155,8 +171,12 @@ def _cmd_diff(
     # stable across the two snapshots (a midnight-UTC straddle would otherwise
     # false-flag a content change under WI-028).
     now = datetime.now(UTC)
-    old = run_all(ingest(old_export), now=now, warn_days=warn_days)
-    new = run_all(ingest(new_export), now=now, warn_days=warn_days)
+    old_estate = ingest(old_export)
+    new_estate = ingest(new_export)
+    _compat_warn(old_estate)
+    _compat_warn(new_estate)
+    old = run_all(old_estate, now=now, warn_days=warn_days)
+    new = run_all(new_estate, now=now, warn_days=warn_days)
     report = diff_findings(old, new)
 
     print(render_diff_json(report) if as_json else render_diff_text(report))

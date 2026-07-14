@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 from adcs_lens.detection import (
     _AUDIT_CATEGORIES,
+    detect_acl_coverage_caveats,
     detect_audit_config,
     detect_esc1,
     detect_esc2,
@@ -23,6 +24,7 @@ from adcs_lens.detection import (
     detect_template_acl_gaps,
     detect_weak_key_size,
     detect_weak_signing,
+    is_degradation_note,
     run_all,
 )
 from adcs_lens.model import (
@@ -1096,6 +1098,100 @@ def test_fresh_crl_no_finding() -> None:
         "host",
     )
     assert detect_infra_cert_expiry(_estate(crls=(crl,)), now=NOW) == []
+
+
+# --- lifecycle: CRL early-warning window (WI-022) -------------------------
+
+
+def test_crl_early_warning_within_window_is_high() -> None:
+    # Validity period 8 days; 25% window = 2 days (floored at 1). 1 day remains
+    # -> within the window -> HIGH (issuing tier), not CRITICAL.
+    crl = Crl("CN=Iss", NOW - timedelta(days=7), NOW + timedelta(days=1), CrlTier.ISSUING, "dp")
+    findings = detect_infra_cert_expiry(_estate(crls=(crl,)), now=NOW)
+    assert len(findings) == 1
+    assert findings[0].check == "CRL_EXPIRY"
+    assert findings[0].severity == Severity.HIGH
+    assert findings[0].tier == CrlTier.ISSUING
+    assert "early-warning" in findings[0].title
+    assert "1 day" in findings[0].title
+
+
+def test_crl_early_warning_root_tier_escalates_to_critical() -> None:
+    crl = Crl("CN=Root", NOW - timedelta(days=7), NOW + timedelta(days=1), CrlTier.ROOT, "dp")
+    findings = detect_infra_cert_expiry(_estate(crls=(crl,)), now=NOW)
+    assert findings[0].severity == Severity.CRITICAL
+    assert findings[0].tier == CrlTier.ROOT
+
+
+def test_crl_outside_warning_window_no_finding() -> None:
+    # Validity 10 days; window 2.5 days; 3 days remain -> outside window -> clean.
+    crl = Crl("CN=Iss", NOW - timedelta(days=7), NOW + timedelta(days=3), CrlTier.ISSUING, "dp")
+    assert detect_infra_cert_expiry(_estate(crls=(crl,)), now=NOW) == []
+
+
+def test_crl_window_floored_to_one_day_for_multi_day_validity() -> None:
+    # Validity 3 days; 25% would be 0.75 day, floored up to 1 day (1d < 3d so the
+    # floor is strictly inside the validity period). 1 day remains -> flagged.
+    crl = Crl("CN=Iss", NOW - timedelta(days=2), NOW + timedelta(days=1), CrlTier.ISSUING, "dp")
+    findings = detect_infra_cert_expiry(_estate(crls=(crl,)), now=NOW)
+    assert len(findings) == 1
+    assert findings[0].severity == Severity.HIGH
+    assert "1 day" in findings[0].title
+
+
+def test_crl_short_validity_not_flagged_from_publication() -> None:
+    # A 24-hour CRL the moment it is published: fractional window is 6h, and the
+    # 1-day floor does NOT apply (1d is not strictly inside a 1d validity), so a
+    # fresh short CRL is not flagged (WI-022 review fix — no false positive from
+    # publication on short-lived CRLs).
+    crl = Crl("CN=Iss", NOW, NOW + timedelta(hours=24), CrlTier.ISSUING, "dp")
+    assert detect_infra_cert_expiry(_estate(crls=(crl,)), now=NOW) == []
+
+
+def test_crl_sub_day_remaining_rendered_in_hours() -> None:
+    # Within the window with under a day remaining -> title reads hours, not the
+    # misleading "0 day(s)" that timedelta.days truncation would produce.
+    validity = timedelta(days=8)
+    next_update = NOW + timedelta(hours=5)
+    crl = Crl("CN=Iss", next_update - validity, next_update, CrlTier.ISSUING, "dp")
+    findings = detect_infra_cert_expiry(_estate(crls=(crl,)), now=NOW)
+    assert len(findings) == 1
+    assert "hour" in findings[0].title
+
+
+def test_crl_without_this_update_only_flags_when_expired() -> None:
+    fresh = Crl("CN=Iss", None, NOW + timedelta(days=1), CrlTier.ISSUING, "dp")
+    assert detect_infra_cert_expiry(_estate(crls=(fresh,)), now=NOW) == []
+    expired = Crl("CN=Iss", None, NOW - timedelta(days=1), CrlTier.ISSUING, "dp")
+    findings = detect_infra_cert_expiry(_estate(crls=(expired,)), now=NOW)
+    assert len(findings) == 1
+    assert findings[0].severity == Severity.CRITICAL
+
+
+# --- ACL coverage caveat (WI-033) -----------------------------------------
+
+
+def test_acl_caveat_fires_when_templates_have_security() -> None:
+    tmpl = _template("T", security=(_enroll_ace(),))
+    findings = detect_acl_coverage_caveats(_estate(templates=(tmpl,)))
+    assert len(findings) == 1
+    assert findings[0].check == "ACL_GROUP_TOKEN_CAVEAT"
+    assert findings[0].severity == Severity.INFO
+    assert is_degradation_note(findings[0])
+    assert "group" in findings[0].detail.lower()
+
+
+def test_acl_caveat_fires_for_pki_acl_or_ca_security() -> None:
+    acl = PkiObjectAcl(object_dn="cn=x", kind=AclKind.NTAUTH, security=(_ctrl_ace(),))
+    assert detect_acl_coverage_caveats(_estate(acls=(acl,)))
+    ca = _ca("CA", security=(_ctrl_ace(),))
+    assert detect_acl_coverage_caveats(_estate(cas=(ca,)))
+
+
+def test_acl_caveat_absent_without_any_acl_inputs() -> None:
+    # Templates with no security, no PKI ACLs, no CA security -> nothing to caveat.
+    assert detect_acl_coverage_caveats(_estate(templates=(_template("T"),))) == []
+    assert detect_acl_coverage_caveats(_estate()) == []
 
 
 # --- ESC11 ----------------------------------------------------------------

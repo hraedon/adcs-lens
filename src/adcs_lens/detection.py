@@ -11,7 +11,7 @@ principle, and ACL-dependent checks degrade to a note rather than a false
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from adcs_lens.model import (
     SEVERITY_RANK,
@@ -215,6 +215,7 @@ _ESC8_KINDS = frozenset({EndpointKind.WEB_ENROLLMENT, EndpointKind.CES})
 # excluded from the --exit-code gate while still being shown in the output.
 _DEGRADATION_NOTES: frozenset[str] = frozenset(
     {
+        "ACL_GROUP_TOKEN_CAVEAT",
         "ALTSECID_NOT_EVALUATED",
         "CA_AUDIT_NOT_EVALUATED",
         "CA_SECURITY_NOT_EVALUATED",
@@ -1454,7 +1455,7 @@ def detect_infra_cert_expiry(
         if crl.next_update is None:
             continue
         findings.extend(
-            _crl_finding(crl, now, warn_days)
+            _crl_finding(crl, now)
         )
     return findings
 
@@ -1494,15 +1495,48 @@ def _expiry_finding(
     ]
 
 
-def _crl_finding(crl: Crl, now: datetime, warn_days: int) -> list[Finding]:
+# CRL early-warning window as a fraction of the CRL's own validity period
+# (next_update - this_update), floored at one day. See _crl_finding for why an
+# absolute day count (tuned for year-long CA certs) is wrong for short CRLs.
+_CRL_EARLY_WARN_FRACTION = 0.25
+
+
+def _crl_horizon(remaining: timedelta) -> str:
+    """Human-readable remaining time for a CRL early-warning title.
+
+    Whole days when >= 1 day remains; otherwise whole hours, so a CRL with two
+    hours left reads "2 hour(s)" rather than the misleading "0 day(s)" that
+    ``timedelta.days`` truncation would produce.
+    """
+    if remaining.days >= 1:
+        return f"{remaining.days} day(s)"
+    hours = int(remaining.total_seconds() // 3600)
+    return f"{hours} hour(s)"
+
+
+def _crl_finding(crl: Crl, now: datetime) -> list[Finding]:
     """Return CRL freshness findings.
 
-    CRLs are typically short-lived (days or weeks), so we flag only expired CRLs
-    here rather than applying the cert-style ``warn_days`` window, which would be
-    excessively noisy for a 7-day CRL. An explicit early-warning window for CRLs
-    can be added later when the model carries CRL validity-period policy.
+    Two states produce a finding:
+
+    * **Past nextUpdate** — CRITICAL. Clients that fetch the CRL treat the chain
+      as invalid; an expired *root*-tier CRL is a silent estate-wide auth failure
+      because its signer is offline.
+    * **Within the early-warning window** — the CRL will expire soon. CRLs are
+      short-lived (days or weeks), so the cert-style absolute ``warn_days``
+      window (tuned for year-long CA certs) would fire on essentially every CRL
+      and is not used here. Instead the window is a fraction of the CRL's *own*
+      validity period (``next_update - this_update``). The fraction is raised to
+      a one-day floor only when that floor stays *strictly inside* the validity
+      period, so a short (<= 1 day) CRL is never flagged from the moment it is
+      published — it gets the pure fractional lead time (e.g. 6 hours for a
+      24-hour CRL). A CRL whose ``this_update`` was not captured cannot be
+      windowed and only the past-nextUpdate check applies.
+
+    The check id stays ``CRL_EXPIRY`` for both states so the threat-model
+    "CRL freshness" row and the consequences entry remain single-valued; the
+    title and severity carry the distinction.
     """
-    del warn_days  # reserved for future CRL validity-policy check
     next_update = crl.next_update
     if next_update is None:
         return []
@@ -1521,6 +1555,43 @@ def _crl_finding(crl: Crl, now: datetime, warn_days: int) -> list[Finding]:
                         "watching it expire (silent estate-wide auth failure)."
                         if root
                         else "."
+                    )
+                ),
+                source=f"CRL nextUpdate {next_update.isoformat()} ({crl.source})",
+                tier=crl.tier,
+            )
+        ]
+    window: timedelta | None = None
+    if crl.this_update is not None:
+        validity = next_update - crl.this_update
+        if validity.total_seconds() > 0:
+            # Fractional lead time of the CRL's own validity. The one-day floor
+            # applies only when it stays strictly inside the validity period, so
+            # a short CRL (validity <= 1 day) is never flagged at publication —
+            # it gets the pure fractional window instead (WI-022 review fix).
+            window = validity * _CRL_EARLY_WARN_FRACTION
+            if window < timedelta(days=1) < validity:
+                window = timedelta(days=1)
+    if window is not None and next_update - now <= window:
+        remaining = next_update - now
+        horizon = _crl_horizon(remaining)
+        severity = Severity.CRITICAL if root else Severity.HIGH
+        return [
+            Finding(
+                check="CRL_EXPIRY",
+                severity=severity,
+                title=f"Published CRL expires in {horizon} (early-warning window)",
+                subject=crl.issuer,
+                detail=(
+                    "The CRL's nextUpdate is approaching; clients depend on a "
+                    "current CRL for revocation checking, and once it passes "
+                    "nextUpdate chain validation fails. Refresh publication "
+                    "before nextUpdate."
+                    + (
+                        " — root-tier CRL expiry cascades estate-wide because the "
+                        "offline signer is not watched."
+                        if root
+                        else ""
                     )
                 ),
                 source=f"CRL nextUpdate {next_update.isoformat()} ({crl.source})",
@@ -1787,6 +1858,48 @@ def detect_audit_config(estate: Estate) -> list[Finding]:
     return findings
 
 
+def detect_acl_coverage_caveats(estate: Estate) -> list[Finding]:
+    """Emit an estate-level note on the ACL-modeling boundary (WI-033).
+
+    The ACL-gated detectors (ESC1–ESC5, ESC7, ESC13, ESC15) reason about the ACE
+    trustee SID directly: nested-group membership is not expanded, so a Deny on a
+    group containing the requester, or Enroll/control rights held only
+    transitively via group membership, are not modeled. The *absence* of an ACL
+    finding is therefore not by itself proof that no ACL path exists. This note
+    surfaces that caveat in the output (not only in a source comment) whenever
+    ACL reasoning actually ran, so a reader never over-trusts a clean ACL result.
+
+    Fires once per estate when any ACL input is present (a template, PKI object,
+    or CA carrying a security descriptor). A minimal export with no ACLs has no
+    ACL reasoning to caveat and gets no note. Excluded from the ``--exit-code``
+    gate via ``_DEGRADATION_NOTES`` — it is a coverage note, not a posture
+    finding.
+    """
+    acl_inputs = (
+        any(tmpl.security for tmpl in estate.templates)
+        or any(acl.security for acl in estate.acls)
+        or any(ca.security for ca in estate.cas)
+    )
+    if not acl_inputs:
+        return []
+    return [
+        Finding(
+            check="ACL_GROUP_TOKEN_CAVEAT",
+            severity=Severity.INFO,
+            title="ACL findings do not expand group membership",
+            subject="(estate)",
+            detail=(
+                "ESC1–ESC5, ESC7, ESC13, and ESC15 match ACEs on the trustee SID "
+                "directly; nested-group tokens are not expanded. A Deny on a group "
+                "containing the requester, or Enroll/control rights held only via "
+                "group membership, are not modeled. Confirm ACL-derived conclusions "
+                "directly in AD when a 'no finding' result is load-bearing."
+            ),
+            source="detection.py: ACL trustee-SID matching (no group-token expansion)",
+        )
+    ]
+
+
 def run_all(
     estate: Estate,
     *,
@@ -1815,6 +1928,7 @@ def run_all(
         *detect_weak_signing(estate),
         *detect_weak_key_size(estate),
         *detect_audit_config(estate),
+        *detect_acl_coverage_caveats(estate),
     ]
     findings.sort(key=lambda f: (SEVERITY_RANK[f.severity], f.check, f.subject))
     return findings

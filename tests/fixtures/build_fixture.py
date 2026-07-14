@@ -47,7 +47,7 @@ def build_export(
     _write_json(
         base / "collector-manifest.json",
         {
-            "collector_version": "0.1.0-fixture",
+            "collector_version": "0.5.0-fixture",
             "collected_at": now.isoformat(),
             "host": "LABCA01",
             "domain": DOMAIN,

@@ -15,6 +15,7 @@ PowerShell 5.1 writes UTF-8 with a BOM.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,56 @@ from adcs_lens.normalize import normalize_sid
 
 class IngestError(ValueError):
     """Raised when an export file is malformed or violates the ingest contract."""
+
+
+# The oldest collector version whose export the core reads at full precision.
+# A collector older than this may omit fields the detectors branch on (csp,
+# owner_sid, ca_patch_state); the core still degrades honestly, but a stale
+# export should not read as silently clean. Warn, do not fail (WI-031).
+MIN_COLLECTOR_VERSION = "0.5.0"
+# Fields a collector at/above MIN is expected to emit; named in the warning so
+# an operator knows which detectors may degrade on a stale export.
+_STALE_COLLECTOR_FIELDS = ("csp", "owner_sid", "ca_patch_state")
+
+
+def _parse_version(s: str) -> tuple[int, int, int] | None:
+    """Parse a leading numeric ``major.minor.patch`` from *s*.
+
+    Tolerates pre-release / build suffixes (``0.5.0-fixture`` → ``(0, 5, 0)``),
+    short forms (``0.5`` → ``(0, 5, 0)``), and a leading ``v`` (``v0.5.0`` →
+    ``(0, 5, 0)``). Returns ``None`` when no leading numeric version is found
+    (``unknown`` / empty / garbage).
+    """
+    m = re.match(r"\s*v?(\d+)(?:\.(\d+))?(?:\.(\d+))?", s)
+    if not m:
+        return None
+    major = int(m.group(1))
+    minor = int(m.group(2)) if m.group(2) else 0
+    patch = int(m.group(3)) if m.group(3) else 0
+    return (major, minor, patch)
+
+
+def collector_compat_warning(manifest: Manifest) -> str | None:
+    """Return a warning when the collector is older than the core's minimum.
+
+    A pre-minimum collector may omit fields the detectors branch on (an older
+    collector emits no ``ca_patch_state`` → ESC15 degrades to MEDIUM-unknown, no
+    ``owner_sid`` → owner-based ESC4/ESC5 control is skipped, no ``csp`` → the
+    weak-key detector falls back to the RSA baseline). The core degrades
+    honestly either way; this warning keeps a stale export from reading as
+    silently clean. Returns ``None`` for a current or unparseable version (an
+    unknown version cannot be ranked, so it is not flagged stale).
+    """
+    got = _parse_version(manifest.collector_version)
+    minimum = _parse_version(MIN_COLLECTOR_VERSION)
+    if got is None or minimum is None or got >= minimum:
+        return None
+    return (
+        f"collector {manifest.collector_version or 'unknown'} is older than the "
+        f"minimum adcs-lens expects ({MIN_COLLECTOR_VERSION}); fields "
+        f"({', '.join(_STALE_COLLECTOR_FIELDS)}) may be absent and some "
+        "detectors will degrade. Re-run with a current collector for full coverage."
+    )
 
 
 Coerced = Any  # alias for the loosely-typed JSON surface

@@ -263,14 +263,21 @@ CONSEQUENCES: dict[str, ConsequenceEntry] = {
     ),
     "CRL_EXPIRY": ConsequenceEntry(
         check="CRL_EXPIRY",
-        summary="A published certificate revocation list has passed its next update time.",
+        summary=(
+            "A published certificate revocation list has passed, or is approaching, "
+            "its next update time."
+        ),
         consequence=(
-            "Clients that fetch the CRL will reject certificates issued by the CA, causing "
-            "widespread authentication and service outages until a fresh CRL is published."
+            "Once a CRL passes nextUpdate, clients that fetch it reject certificates "
+            "issued by the CA, causing widespread authentication and service outages "
+            "until a fresh CRL is published. A CRL approaching nextUpdate should be "
+            "refreshed proactively, because the window closes silently — a root-tier "
+            "CRL expiry is a silent estate-wide failure because its offline signer is "
+            "not watched."
         ),
         remediation=(
-            "Publish a fresh CRL immediately and verify that CRL distribution points are reachable "
-            "and monitored."
+            "Publish a fresh CRL before nextUpdate, then verify CRL distribution points "
+            "are reachable and that publication is scheduled and monitored."
         ),
     ),
     "TEMPLATE_ACL_UNREADABLE": ConsequenceEntry(
@@ -473,6 +480,21 @@ CONSEQUENCES: dict[str, ConsequenceEntry] = {
         remediation=(
             "Install the optional certificates extra and re-ingest the export with DER cert/CRL "
             "parsing enabled."
+        ),
+    ),
+    "ACL_GROUP_TOKEN_CAVEAT": ConsequenceEntry(
+        check="ACL_GROUP_TOKEN_CAVEAT",
+        summary=(
+            "Access-control findings match ACEs by trustee SID and do not expand group membership."
+        ),
+        consequence=(
+            "A Deny on a group that contains the requester, or Enroll and control rights held only "
+            "through nested group membership, are not modeled. A 'no finding' result is therefore "
+            "not by itself proof that no access-control escalation path exists."
+        ),
+        remediation=(
+            "When an ACL conclusion is load-bearing, confirm it directly in Active Directory with "
+            "the requester's full group token expanded."
         ),
     ),
 }

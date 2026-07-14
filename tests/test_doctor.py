@@ -55,6 +55,27 @@ def test_cli_reports_malformed_export(tmp_path: Path, capsys: pytest.CaptureFixt
     assert "malformed JSON" in capsys.readouterr().err
 
 
+def test_old_collector_warns_on_stderr(
+    json_export: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A pre-minimum collector may omit fields detectors branch on -> visible warning.
+    manifest_path = json_export / "collector-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    manifest["collector_version"] = "0.4.0"
+    manifest_path.write_text(json.dumps(manifest))
+    assert main(["doctor", str(json_export)]) == 0
+    err = capsys.readouterr().err
+    assert "warning" in err
+    assert "0.4.0" in err
+
+
+def test_current_collector_is_silent_on_stderr(
+    json_export: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["ingest", str(json_export)]) == 0
+    assert capsys.readouterr().err == ""
+
+
 def test_doctor_severity_floor_excludes_below_threshold(
     json_export: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

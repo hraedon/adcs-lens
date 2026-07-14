@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from adcs_lens.ingest import IngestError, ingest
-from adcs_lens.model import CaKind, CrlTier, Severity
+from adcs_lens.ingest import IngestError, collector_compat_warning, ingest
+from adcs_lens.model import CaKind, CrlTier, Manifest, Severity
 from adcs_lens.normalize import is_low_priv_trustee
 
 
@@ -28,7 +28,7 @@ def test_bom_tolerant(json_export: Path) -> None:
     # collector-manifest.json is written with a UTF-8 BOM; ingest must not choke.
     raw = (json_export / "collector-manifest.json").read_bytes()
     assert raw[:3] == b"\xef\xbb\xbf", "fixture should exercise the BOM path"
-    assert ingest(json_export).manifest.collector_version == "0.1.0-fixture"
+    assert ingest(json_export).manifest.collector_version == "0.5.0-fixture"
 
 
 def test_ca_flags_and_kind(json_export: Path) -> None:
@@ -308,3 +308,48 @@ def test_template_acl_unreadable_end_to_end(json_export: Path) -> None:
         f.check == "ESC1" and f.subject == unreadable.display_name for f in findings
     )
     assert all(f.check != "TEMPLATE_ACL_NOT_EVALUATED" for f in findings)
+
+
+# --- collector/core version compatibility (WI-031) ------------------------
+
+
+def _manifest(version: str) -> Manifest:
+    return Manifest(
+        collector_version=version,
+        collected_at="",
+        host="",
+        domain="",
+        skipped_passes=(),
+        certs_parsed=False,
+    )
+
+
+def test_parse_version_tolerates_suffix_and_short_forms() -> None:
+    from adcs_lens.ingest import _parse_version
+
+    assert _parse_version("0.5.0") == (0, 5, 0)
+    assert _parse_version("0.5.0-fixture") == (0, 5, 0)
+    assert _parse_version("v0.5.0") == (0, 5, 0)
+    assert _parse_version("1.2") == (1, 2, 0)
+    assert _parse_version("unknown") is None
+    assert _parse_version("") is None
+
+
+def test_compat_warning_for_old_collector() -> None:
+    msg = collector_compat_warning(_manifest("0.4.9"))
+    assert msg is not None
+    assert "0.4.9" in msg
+    assert "0.5.0" in msg
+    assert "owner_sid" in msg  # names the fields that may be absent
+    # A v-prefixed stale version is still recognized as stale.
+    assert collector_compat_warning(_manifest("v0.4.0")) is not None
+
+
+def test_compat_warning_silent_for_current_collector() -> None:
+    assert collector_compat_warning(_manifest("0.5.0")) is None
+    assert collector_compat_warning(_manifest("1.0.0")) is None
+
+
+def test_compat_warning_silent_for_unparseable_version() -> None:
+    # An unknown version cannot be ranked, so it is not flagged stale.
+    assert collector_compat_warning(_manifest("unknown")) is None
