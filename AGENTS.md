@@ -78,20 +78,26 @@ exports (WI-001), never from a standing connection.
 
 ## Status
 
-The deterministic core is built and tested (ingest → `doctor` → `diff`, ESC1 + ESC2 +
-ESC3 + ESC4 + ESC5 + ESC6 + ESC7 + ESC8 + ESC9 + ESC11 + ESC13 + infra lifecycle
-detectors, architecture guard), plus a per-template unreadable-DACL signal
-(`TEMPLATE_ACL_UNREADABLE`). The read-only PowerShell collector
+The deterministic core is built and tested (ingest → `doctor` → `diff`, ESC1–ESC11,
+ESC13–ESC16 detectors — ESC12 has no static-detectability boundary — plus
+crypto/operational hygiene detectors `WEAK_SIG_ALG` / `WEAK_KEY_SIZE` /
+`WEAK_TEMPLATE_KEY_SIZE` / `CA_AUDIT_DISABLED` / `CA_AUDIT_UNDERSCOPED`, infra
+cert/CRL lifecycle, and an architecture guard), plus a per-template unreadable-DACL
+signal (`TEMPLATE_ACL_UNREADABLE`). The read-only PowerShell collector
 (`scripts/Export-AdcsEstate.ps1`) captures CA config, templates (with their
 DACLs → ACEs, and an `acl_obtained` marker), CA role security
-(`CA\Security` → ESC7), PKI-object ACLs (NTAuth / AIA / CDP / PKS containers +
-CA objects → ESC5), IIS enrollment endpoints (Web Enrollment / CES bindings +
-Windows-auth + Extended Protection → ESC8), issuance OIDs, and the opt-in
-ESC10/ESC14 DC certificate-mapping passes (`-CollectDcMapping`: `esc14-altsecid`
-LDAP read of principal altSecurityIdentities + `esc10-dc-registry` per-DC KDC
+(`CA\Security` → ESC7, incl. `owner_sid` for owner-based control), PKI-object ACLs
+(NTAuth / AIA / CDP / PKS containers + CA objects → ESC5), IIS enrollment
+endpoints (Web Enrollment / CES bindings + Windows-auth + Extended Protection
+→ ESC8), issuance OIDs, and the opt-in ESC10/ESC14 DC certificate-mapping passes
+(`-CollectDcMapping`: `esc14-altsecid` LDAP read of principal
+altSecurityIdentities + `esc10-dc-registry` per-DC KDC
 StrongCertificateBindingEnforcement and Schannel CertificateMappingMethods via
-WMI StdRegProv with explicit creds); validated end-to-end against a live
-enterprise CA. ESC15 (EKUwu / CVE-2024-49019) flags schema v1 templates a low-priv
+WMI StdRegProv with explicit creds); its **core passes are validated
+end-to-end against a live enterprise CA**, but the v0.6.0 CA `owner_sid` capture
+is additive and **not yet live-validated** (Pester-unit-tested; treat the ESC7
+owner finding as unconfirmed until the next live run).
+ESC15 (EKUwu / CVE-2024-49019) flags schema v1 templates a low-priv
 principal can enroll in, with severity tracking CA patch state (HIGH unpatched /
 MEDIUM unknown / suppressed patched) — the collector emits `ca_patch_state`
 (unknown by default; a future enhancement can populate it from the OS build).

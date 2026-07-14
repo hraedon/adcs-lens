@@ -53,8 +53,11 @@ class IngestError(ValueError):
 # The oldest collector version whose export the core reads at full precision.
 # A collector older than this may omit fields the detectors branch on (csp,
 # owner_sid, ca_patch_state); the core still degrades honestly, but a stale
-# export should not read as silently clean. Warn, do not fail (WI-031).
-MIN_COLLECTOR_VERSION = "0.5.0"
+# export should not read as silently clean. Warn, do not fail (WI-031). MIN is
+# 0.6.0 because CA\\Security owner_sid (ESC7 owner-based control, a CRITICAL-class
+# path) landed then — a pre-0.6.0 export silently lacks it and that path can't
+# fire, so the warning is what keeps the gap visible.
+MIN_COLLECTOR_VERSION = "0.6.0"
 # Fields a collector at/above MIN is expected to emit; named in the warning so
 # an operator knows which detectors may degrade on a stale export.
 _STALE_COLLECTOR_FIELDS = ("csp", "owner_sid", "ca_patch_state")

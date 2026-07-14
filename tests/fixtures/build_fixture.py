@@ -22,6 +22,7 @@ DOMAIN = "lab.example.com"
 ROOT_CA = "LAB Root CA"
 ISSUING_CA = "LAB Issuing CA"
 LOW_PRIV_SID = "S-1-5-21-1111111111-2222222222-3333333333-513"  # "Domain Users"
+HIGH_PRIV_SID = "S-1-5-21-1111111111-2222222222-3333333333-512"  # "Domain Admins"
 TEMPLATE_OID = "1.3.6.1.4.1.311.21.8.1.2.3.4.100"
 POLICY_OID = "1.3.6.1.4.1.311.21.8.1.2.3.4.200"
 
@@ -47,7 +48,7 @@ def build_export(
     _write_json(
         base / "collector-manifest.json",
         {
-            "collector_version": "0.5.0-fixture",
+            "collector_version": "0.6.0-fixture",
             "collected_at": now.isoformat(),
             "host": "LABCA01",
             "domain": DOMAIN,
@@ -70,6 +71,10 @@ def build_export(
                 "disabled_extensions": [],
                 # Offline root; patch state unknown is the honest default.
                 "ca_patch_state": "unknown",
+                # Owned by a high-priv principal (Domain Admins) so the ESC7
+                # owner-based path does not fire — exercises the 0.6.0 field
+                # round-trip without adding a finding.
+                "owner_sid": HIGH_PRIV_SID,
             },
             {
                 "name": ISSUING_CA,
@@ -88,6 +93,7 @@ def build_export(
                 # ESC15 (EKUwu) finding stays HIGH end-to-end (the common vulnerable
                 # case the fixture exercises).
                 "ca_patch_state": "unpatched",
+                "owner_sid": HIGH_PRIV_SID,
             },
         ],
     )

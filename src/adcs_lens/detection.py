@@ -1919,7 +1919,7 @@ def detect_audit_config(estate: Estate) -> list[Finding]:
 def detect_acl_coverage_caveats(estate: Estate) -> list[Finding]:
     """Emit an estate-level note on the ACL-modeling boundary (WI-033).
 
-    The ACL-gated detectors (ESC1–ESC5, ESC7, ESC13, ESC15) reason about the ACE
+    The ACL-gated detectors (ESC1–ESC5, ESC7, ESC9, ESC13, ESC15) reason about the ACE
     trustee SID directly: nested-group membership is not expanded, so a Deny on a
     group containing the requester, or Enroll/control rights held only
     transitively via group membership, are not modeled. The *absence* of an ACL
@@ -1947,7 +1947,7 @@ def detect_acl_coverage_caveats(estate: Estate) -> list[Finding]:
             title="ACL findings do not expand group membership",
             subject="(estate)",
             detail=(
-                "ESC1–ESC5, ESC7, ESC13, and ESC15 match ACEs on the trustee SID "
+                "ESC1–ESC5, ESC7, ESC9, ESC13, and ESC15 match ACEs on the trustee SID "
                 "directly; nested-group tokens are not expanded. A Deny on a group "
                 "containing the requester, or Enroll/control rights held only via "
                 "group membership, are not modeled. Confirm ACL-derived conclusions "

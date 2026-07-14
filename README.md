@@ -91,6 +91,27 @@ later plan), never from a standing connection.
 - **Evidence-producing.** The output is an artifact an auditor or manager can
   read — findings prioritized by severity, each traceable to a source fact.
 
+## Install
+
+adcs-lens needs **Python ≥ 3.12**. The deterministic core is stdlib-only and
+air-gappable (zero runtime dependencies). Install the optional `[certs]` extra to
+enable CA/CRL (DER) lifecycle parsing — cert/CRL expiry, CRL early-warning, weak
+signing algorithm, and CA-cert key-size checks. Without `[certs]`, lifecycle
+fields are `None` and those checks degrade to an explicit coverage note rather
+than producing wrong answers.
+
+```bash
+# From the v1.0.0 release tag (recommended):
+pip install "adcs-lens[certs] @ git+https://github.com/hraedon/adcs-lens.git@v1.0.0"
+
+# Or, from a checkout:
+pip install -e ".[certs]"
+```
+
+This installs the `adcs-lens` command. PyPI publishing is a planned follow-up;
+until then install from git or vendor the single `src/adcs_lens/` package — the
+dependency-free core is well suited to an air-gapped / tier-0 analysis host.
+
 ## Workflow
 
 ```powershell
@@ -120,12 +141,15 @@ adcs-lens diff  OLD NEW --exit-code       # non-zero on regressions (for schedul
 > and JSON output, `doctor --sarif` emits SARIF v2.1.0 for CI / GRC integration,
 > and `doctor --html` emits a self-contained, deterministic HTML evidence report.
 > The read-only PowerShell **collector** (`scripts/Export-AdcsEstate.ps1`) is
-> built and validated end-to-end against a live enterprise CA — including the
-> PKI-object ACL pass (NTAuth / AIA / CDP / PKS containers + CA objects) that
-> backs ESC5 and the IIS enrollment-endpoint pass (Web Enrollment / CES bindings,
-> Windows-auth, Extended Protection) that backs ESC8. The synthetic fixture
-> generator (`tests/fixtures/build_fixture.py`) exercises the full pipeline
-> end-to-end. The **ESC10 / ESC14** detectors (DC certificate-mapping) use a
+> built and its core passes are **validated end-to-end against a live enterprise
+> CA** — including the PKI-object ACL pass (NTAuth / AIA / CDP / PKS containers
+> + CA objects) that backs ESC5 and the IIS enrollment-endpoint pass (Web
+> Enrollment / CES bindings, Windows-auth, Extended Protection) that backs ESC8.
+> The synthetic fixture generator (`tests/fixtures/build_fixture.py`) exercises
+> the full pipeline end-to-end. The v0.6.0 CA `owner_sid` capture (ESC7
+> owner-based control) is additive and **not yet live-validated** — it is
+> Pester-unit-tested and correct by inspection, but the ESC7 owner finding should
+> be treated as unconfirmed until the next live collector run. The **ESC10 / ESC14** detectors (DC certificate-mapping) use a
 > KB5014754-aligned taxonomy — ESC10 keys on the Schannel UPN mapping bit and a
 > disabled KDC binding; ESC14 flags only *weak (reusable)* altSecurityIdentities
 > forms (subject-only, issuer+subject, RFC822, UPN), never the strong (nonreusable)

@@ -28,7 +28,7 @@ def test_bom_tolerant(json_export: Path) -> None:
     # collector-manifest.json is written with a UTF-8 BOM; ingest must not choke.
     raw = (json_export / "collector-manifest.json").read_bytes()
     assert raw[:3] == b"\xef\xbb\xbf", "fixture should exercise the BOM path"
-    assert ingest(json_export).manifest.collector_version == "0.5.0-fixture"
+    assert ingest(json_export).manifest.collector_version == "0.6.0-fixture"
 
 
 def test_ca_flags_and_kind(json_export: Path) -> None:
@@ -339,14 +339,19 @@ def test_compat_warning_for_old_collector() -> None:
     msg = collector_compat_warning(_manifest("0.4.9"))
     assert msg is not None
     assert "0.4.9" in msg
-    assert "0.5.0" in msg
+    assert "0.6.0" in msg
     assert "owner_sid" in msg  # names the fields that may be absent
     # A v-prefixed stale version is still recognized as stale.
     assert collector_compat_warning(_manifest("v0.4.0")) is not None
 
 
+def test_compat_warning_for_collector_lacking_ca_owner() -> None:
+    # 0.5.0 predates CA owner_sid (ESC7 owner-based control) — it is now stale.
+    assert collector_compat_warning(_manifest("0.5.0")) is not None
+
+
 def test_compat_warning_silent_for_current_collector() -> None:
-    assert collector_compat_warning(_manifest("0.5.0")) is None
+    assert collector_compat_warning(_manifest("0.6.0")) is None
     assert collector_compat_warning(_manifest("1.0.0")) is None
 
 
