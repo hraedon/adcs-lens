@@ -319,6 +319,7 @@ def ingest(export_dir: str | Path) -> Estate:
                     "CA patch state",
                     default="unknown",
                 ),
+                owner_sid=normalize_sid(_coerce_str(ca.get("owner_sid", ""))),
             )
         )
 

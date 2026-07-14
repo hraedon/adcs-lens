@@ -114,6 +114,7 @@ def _ca(
     security: tuple[AceEntry, ...] = (),
     disabled_extensions: tuple[str, ...] = (),
     ca_patch_state: CaPatchState = CaPatchState.UNKNOWN,
+    owner_sid: str = "",
 ) -> CertAuthority:
     return CertAuthority(
         name=name,
@@ -127,6 +128,7 @@ def _ca(
         certs=certs,
         disabled_extensions=frozenset(disabled_extensions),
         ca_patch_state=ca_patch_state,
+        owner_sid=owner_sid,
     )
 
 
@@ -541,28 +543,89 @@ def test_esc7_degrades_when_ca_security_not_collected() -> None:
     assert findings[0].severity == Severity.INFO
 
 
+def test_esc7_owner_based_control_is_critical() -> None:
+    # A low-priv owner of CA\Security can rewrite the DACL -> grant ManageCA
+    # (WI-037). Distinct vector from an ACE; distinct remediation (reset owner).
+    ca = _ca("IssuingCA", security=(), owner_sid=LOW_PRIV_SID)
+    findings = detect_esc7(_estate(cas=(ca,)))
+    assert len(findings) == 1
+    assert findings[0].check == "ESC7"
+    assert findings[0].severity == Severity.CRITICAL
+    assert "owned by" in findings[0].title.lower()
+    assert "owner" in findings[0].source.lower()
+
+
+def test_esc7_high_priv_owner_not_flagged() -> None:
+    ca = _ca("IssuingCA", security=(), owner_sid=HIGH_PRIV_SID)
+    assert detect_esc7(_estate(cas=(ca,))) == []
+
+
+def test_esc7_owner_absent_not_flagged() -> None:
+    # owner_sid empty (not captured) -> owner control skipped, not a false positive.
+    ca = _ca("IssuingCA", security=(), owner_sid="")
+    assert detect_esc7(_estate(cas=(ca,))) == []
+
+
+def test_esc7_owner_and_ace_emit_distinct_findings() -> None:
+    # Both an ACE granting ManageCerts and a low-priv owner -> two findings
+    # (distinct vectors, distinct diff keys via source).
+    ca = _ca(
+        "IssuingCA",
+        security=(_enroll_ace(right="ManageCertificates"),),
+        owner_sid=LOW_PRIV_SID,
+    )
+    findings = [f for f in detect_esc7(_estate(cas=(ca,))) if f.check == "ESC7"]
+    assert len(findings) == 2
+    sources = {f.source for f in findings}
+    assert any("owner" in s.lower() for s in sources)
+    assert any("owner" not in s.lower() for s in sources)
+
+
 # --- ESC9 -----------------------------------------------------------------
 
 
-def test_esc9_flagged_on_no_security_extension() -> None:
-    tmpl = _template("WeakMap", enrollment_flags=("NO_SECURITY_EXTENSION",))
+def test_esc9_flagged_when_enrollable_and_no_approval() -> None:
+    tmpl = _template(
+        "WeakMap",
+        enrollment_flags=("NO_SECURITY_EXTENSION",),
+        security=(_enroll_ace(),),
+    )
     findings = detect_esc9(_estate(templates=(tmpl,)))
     assert len(findings) == 1
     assert findings[0].check == "ESC9"
     assert findings[0].severity == Severity.HIGH
+    assert "Enrollable by" in findings[0].detail
 
 
 def test_esc9_clean_template_no_finding() -> None:
     assert detect_esc9(_estate(templates=(_template("Clean"),))) == []
 
 
-def test_esc9_evaluates_even_without_template_security() -> None:
-    # ESC9 needs only enrollment flags, so it works on a real (ACL-skipped) export.
-    tmpl = _template("WeakMap", enrollment_flags=("NO_SECURITY_EXTENSION",))
-    findings = detect_esc9(
-        _estate(templates=(tmpl,), skipped_passes=("template-security",))
+def test_esc9_not_flagged_without_low_priv_enroll() -> None:
+    # The flag is present but no low-priv principal can enroll -> not an
+    # attacker-reachable primitive -> no false positive (WI-038).
+    tmpl = _template(
+        "WeakMap",
+        enrollment_flags=("NO_SECURITY_EXTENSION",),
+        security=(_enroll_ace(HIGH_PRIV_SID),),
     )
-    assert len(findings) == 1
+    assert detect_esc9(_estate(templates=(tmpl,))) == []
+
+
+def test_esc9_not_flagged_with_manager_approval() -> None:
+    tmpl = _template(
+        "WeakMap",
+        enrollment_flags=("NO_SECURITY_EXTENSION", "PEND_ALL_REQUESTS"),
+        security=(_enroll_ace(),),
+    )
+    assert detect_esc9(_estate(templates=(tmpl,))) == []
+
+
+def test_esc9_degrades_when_template_security_skipped() -> None:
+    # Without template security the enroll ACL cannot be evaluated -> ESC9
+    # returns nothing (ESC1 emits the estate-level degrade note). No silent pass.
+    tmpl = _template("WeakMap", enrollment_flags=("NO_SECURITY_EXTENSION",))
+    assert detect_esc9(_estate(templates=(tmpl,), skipped_passes=("template-security",))) == []
 
 
 # --- ESC16 -----------------------------------------------------------------
@@ -963,19 +1026,19 @@ def test_esc3_skips_unreadable_template() -> None:
     assert detect_esc3(_estate(templates=(tmpl,))) == []
 
 
-def test_esc9_still_evaluates_unreadable_template() -> None:
-    # ESC9 does not depend on the ACL — still flagged even when acl_obtained=False.
+def test_esc9_skips_unreadable_template() -> None:
+    # The enroll ACL could not be read (acl_obtained=False) -> ESC9 cannot
+    # confirm enrollability -> skips the template (TEMPLATE_ACL_UNREADABLE
+    # covers the gap). Not a false positive, not a silent pass.
     tmpl = _template(
         "WeakMap", enrollment_flags=("NO_SECURITY_EXTENSION",), acl_obtained=False
     )
-    findings = detect_esc9(_estate(templates=(tmpl,)))
-    assert len(findings) == 1
-    assert findings[0].check == "ESC9"
+    assert detect_esc9(_estate(templates=(tmpl,))) == []
 
 
 def test_acl_gap_wired_into_run_all() -> None:
     # Unreadable-template estate: TEMPLATE_ACL_UNREADABLE present, matching ESC1
-    # absent, but ESC9 present because the template also has NO_SECURITY_EXTENSION.
+    # and ESC9 absent (both need the enroll ACL, which is unreadable).
     tmpl = _template(
         "Unreadable",
         security=(_enroll_ace(),),
@@ -985,7 +1048,7 @@ def test_acl_gap_wired_into_run_all() -> None:
     checks = {f.check for f in run_all(_estate(templates=(tmpl,)))}
     assert "TEMPLATE_ACL_UNREADABLE" in checks
     assert "ESC1" not in checks
-    assert "ESC9" in checks
+    assert "ESC9" not in checks
 
 
 # --- lifecycle: degrade path ----------------------------------------------

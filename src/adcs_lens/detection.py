@@ -385,8 +385,9 @@ def detect_esc1(estate: Estate) -> list[Finding]:
                 subject="(estate)",
                 detail=(
                     "The export did not include template security descriptors, so "
-                    "ESC1 enroll-permission checks were skipped. Re-run a collector "
-                    "that captures template nTSecurityDescriptor ACEs (Phase 1b)."
+                    "ESC1 and ESC9 enroll-permission checks were skipped. Re-run a "
+                    "collector that captures template nTSecurityDescriptor ACEs "
+                    "(Phase 1b)."
                 ),
                 source="collector-manifest.json: skipped_passes contains 'template-security'",
             )
@@ -693,6 +694,11 @@ def detect_esc7(estate: Estate) -> list[Finding]:
     imply a CA role are recognized via the ``_COVERS`` implication map, so a
     low-privilege trustee granted blanket CA control is not silently missed.
 
+    Owner-based control (WI-037): a low-privilege *owner* of ``CA\\Security`` can
+    rewrite the DACL to grant itself Manage CA — the CA-level analogue of ESC4/
+    ESC5 owner control — and is flagged separately (distinct vector and
+    remediation: reset ownership). Skipped when the owner was not captured.
+
     Degrades to a note when the CA security descriptor was not collected.
     """
     if _CA_SECURITY_PASS in estate.manifest.skipped_passes:
@@ -756,6 +762,27 @@ def detect_esc7(estate: Estate) -> list[Finding]:
                         "requests. Remove the role from low-privilege principals."
                     ),
                     source=f"{ca.config_string or ca.name}: CA\\Security",
+                )
+            )
+        # Owner-based control (WI-037): a low-privilege owner of CA\\Security can
+        # rewrite the DACL to grant itself Manage CA — the CA-level analogue of
+        # ESC4/ESC5 owner control. Emitted as a distinct finding (distinct vector
+        # and remediation: reset ownership, not just remove an ACE). Skipped when
+        # the owner was not captured (a known gap, never a false positive).
+        if ca.owner_sid and is_low_priv_trustee(ca.owner_sid):
+            findings.append(
+                Finding(
+                    check="ESC7",
+                    severity=Severity.CRITICAL,
+                    title="CA security descriptor owned by a low-privilege principal",
+                    subject=ca.name,
+                    detail=(
+                        f"The owner of this CA's security descriptor ({ca.owner_sid}) "
+                        "is a low-privilege principal. As the owner it can rewrite the "
+                        "DACL to grant itself Manage CA (full CA control) or Manage "
+                        "Certificates. Reset ownership to a privileged account."
+                    ),
+                    source=f"{ca.config_string or ca.name}: CA\\Security owner",
                 )
             )
     return findings
@@ -847,33 +874,64 @@ def detect_esc8(estate: Estate) -> list[Finding]:
 
 
 def detect_esc9(estate: Estate) -> list[Finding]:
-    """Flag templates with CT_FLAG_NO_SECURITY_EXTENSION set.
+    """Flag enrollable templates with CT_FLAG_NO_SECURITY_EXTENSION set.
 
-    ESC9: certificates issued from the template omit the SID security extension,
-    so on a DC where ``StrongCertificateBindingEnforcement`` is not enforcing the
-    cert can be mapped to a different (higher-privilege) account. We flag the
-    enabling template flag; the mapping/relay itself is out of scope. Readable
-    from the template enrollment flags with no ACL dependency, so it evaluates on
-    every export (unlike ESC1).
+    ESC9: certificates issued from such a template omit the SID security
+    extension (szOID_NTDS_CA_SECURITY_EXT), so on a DC where
+    ``StrongCertificateBindingEnforcement`` is not enforcing the cert can be
+    mapped to a different (higher-privilege) account. We flag the enabling
+    template flag only where it is *attacker-reachable*: a low-privilege
+    principal can enroll without CA manager approval. A template nobody
+    low-priv can enroll, or that requires manager approval, is not an unattended
+    primitive and is not flagged (WI-038 — this closes the clear false-positive
+    vector where ESC9 previously fired on every template carrying the flag).
+
+    This mirrors the false-negative-safe subset of ESC1's gating (enroll ACL +
+    no manager approval) — these gates can only suppress templates that are not
+    attacker-reachable, so they cannot hide a real ESC9 primitive. It does NOT
+    gate on client-auth EKU or on DC binding enforcement: the EKU gate has
+    mapping-relevance edge cases (the remaining open question in WI-038), and
+    enforcement gating would need opt-in DC data whose absence would suppress
+    ESC9 on most exports (ESC16, the CA-level analogue, likewise hedges on
+    enforcement in its detail text rather than gating).
+
+    Degrades honestly: when template security descriptors were not collected the
+    enroll ACL cannot be evaluated, so this returns nothing and ESC1 emits the
+    estate-level ``TEMPLATE_ACL_NOT_EVALUATED`` note.
     """
+    if not _template_security_collected(estate):
+        return []
     findings: list[Finding] = []
     for tmpl in estate.templates:
-        if _NO_SECURITY_EXTENSION in tmpl.enrollment_flags:
-            findings.append(
-                Finding(
-                    check="ESC9",
-                    severity=Severity.HIGH,
-                    title="Template omits the SID security extension (NO_SECURITY_EXTENSION)",
-                    subject=tmpl.display_name or tmpl.name,
-                    detail=(
-                        "Certificates from this template lack szOID_NTDS_CA_SECURITY_EXT. "
-                        "Where DC StrongCertificateBindingEnforcement is not enforcing, the "
-                        "cert can be mapped to another account. Clear the flag unless a "
-                        "specific mapping scenario requires it."
-                    ),
-                    source=f"template '{tmpl.name}': msPKI-Enrollment-Flag",
-                )
+        if not tmpl.acl_obtained:
+            continue
+        if _NO_SECURITY_EXTENSION not in tmpl.enrollment_flags:
+            continue
+        if _MANAGER_APPROVAL in tmpl.enrollment_flags:
+            continue
+        enrollers = _low_priv_enrollers(tmpl)
+        if not enrollers:
+            continue
+        who = ", ".join(sorted({a.trustee_name or a.trustee_sid for a in enrollers}))
+        findings.append(
+            Finding(
+                check="ESC9",
+                severity=Severity.HIGH,
+                title=(
+                    "Enrollable template omits the SID security extension "
+                    "(NO_SECURITY_EXTENSION)"
+                ),
+                subject=tmpl.display_name or tmpl.name,
+                detail=(
+                    f"Enrollable by {who}; certificates from this template lack "
+                    "szOID_NTDS_CA_SECURITY_EXT. Where DC "
+                    "StrongCertificateBindingEnforcement is not enforcing, the cert "
+                    "can be mapped to another account. Clear the flag unless a "
+                    "specific mapping scenario requires it."
+                ),
+                source=f"template '{tmpl.name}': msPKI-Enrollment-Flag + enroll ACL",
             )
+        )
     return findings
 
 

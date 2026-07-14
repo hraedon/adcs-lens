@@ -73,7 +73,8 @@ class DriftReport:
 
     new: tuple[Finding, ...]  # regressions: present now, absent before
     resolved: tuple[Finding, ...]  # fixes: present before, absent now
-    changed: tuple[FindingDelta, ...]  # same (check, subject), different severity or content
+    # same (check, subject, source), different severity or content
+    changed: tuple[FindingDelta, ...]
     unchanged: int  # count of findings identical across both
 
     @property

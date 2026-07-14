@@ -80,3 +80,19 @@ Describe '_readOwner (Windows / System.DirectoryServices)' {
         _readOwner ([byte[]]@()) | Should -Be ''
     }
 }
+
+Describe '_rawSdOwner (Windows / RawSecurityDescriptor — CA\Security owner, WI-037)' {
+    It 'returns the owner SID from a synthetic CA-style security descriptor' {
+        # _caSecurityOwner parses the CA registry SD via RawSecurityDescriptor
+        # (not the AD ActiveDirectorySecurity parser _readOwner uses). A binary SD
+        # built either way is a valid self-relative SD, so New-SdWithOwner feeds
+        # both parsers and confirms the CA-registry parser path reads the owner.
+        $bytes = New-SdWithOwner $TEST_SID
+        _rawSdOwner $bytes | Should -Be $TEST_SID
+    }
+
+    It 'returns empty for null or empty input' {
+        _rawSdOwner $null | Should -Be ''
+        _rawSdOwner ([byte[]]@()) | Should -Be ''
+    }
+}

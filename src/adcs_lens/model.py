@@ -230,6 +230,11 @@ class CertAuthority:
     # Whether the CA is patched for CVE-2024-49019 (EKUwu / ESC15). Defaults to
     # UNKNOWN so the ESC15 detector degrades honestly (see CaPatchState).
     ca_patch_state: CaPatchState = CaPatchState.UNKNOWN
+    # Security descriptor owner (normalized SID) of CA\\Security. Empty when not
+    # captured; the ESC7 detector then skips owner-based control (a known gap,
+    # not a false positive). A low-priv owner can rewrite the CA DACL to grant
+    # itself Manage CA — the CA-level analogue of ESC4/ESC5 owner control.
+    owner_sid: str = ""
 
 
 @dataclass(frozen=True)

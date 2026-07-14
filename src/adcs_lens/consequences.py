@@ -117,15 +117,20 @@ CONSEQUENCES: dict[str, ConsequenceEntry] = {
     ),
     "ESC7": ConsequenceEntry(
         check="ESC7",
-        summary="A low-privilege principal holds CA manager or certificate-officer rights on a CA.",
+        summary=(
+            "A low-privilege principal holds CA manager or certificate-officer rights on a CA, "
+            "or owns the CA security descriptor."
+        ),
         consequence=(
             "With Manage Certificates, the holder can approve pending requests and issue "
             "attacker-chosen certificates. With Manage CA, they can additionally change CA policy "
-            "to enable other escalation paths, such as requester-supplied SANs."
+            "to enable other escalation paths, such as requester-supplied SANs. A low-privilege "
+            "owner of the CA security descriptor can rewrite it to grant itself either role."
         ),
         remediation=(
             "Remove non-administrative principals from the Manage CA and Manage Certificates "
-            "roles on certificate authorities."
+            "roles on certificate authorities, and reset CA security descriptor ownership to a "
+            "privileged account when a low-privilege principal is the owner."
         ),
     ),
     "ESC8": ConsequenceEntry(
@@ -296,8 +301,8 @@ CONSEQUENCES: dict[str, ConsequenceEntry] = {
         check="TEMPLATE_ACL_NOT_EVALUATED",
         summary="Template security descriptors were not collected in this export.",
         consequence=(
-            "The tool cannot rule out ESC1, ESC2, ESC3, ESC4, ESC13, or ESC15 on any template, so "
-            "the posture for template-based escalation is unverified."
+            "The tool cannot rule out ESC1, ESC2, ESC3, ESC4, ESC9, ESC13, or ESC15 on any "
+            "template, so the posture for template-based escalation is unverified."
         ),
         remediation=(
             "Re-run the collector with the template-security pass enabled to capture template "

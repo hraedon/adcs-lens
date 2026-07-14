@@ -34,9 +34,9 @@ The detectability column *is* the "flag, don't probe" principle made concrete:
 | ESC4 | Template object ACL grants write to low-priv, or low-priv owner (can be edited into ESC1) | **Static** | template `nTSecurityDescriptor` (DACL + owner) |
 | ESC5 | Writable ACL / low-priv owner on PKI objects (CA objects, NTAuth, PKS containers) | **Static** | container/object `nTSecurityDescriptor` (DACL + owner) |
 | ESC6 | `EDITF_ATTRIBUTESUBJECTALTNAME2` set on the CA | **Static** | CA registry `policy\EditFlags` (`certutil -getreg`) |
-| ESC7 | CA permissions (ManageCA / ManageCertificates) held by low-priv | **Static** | CA security descriptor (`certutil -getreg CA\Security`) |
+| ESC7 | CA permissions (ManageCA / ManageCertificates) held by low-priv, or low-priv owner of the CA security descriptor | **Static** | CA security descriptor DACL + owner (`certutil -getreg CA\Security`) |
 | ESC8 | NTLM relay to HTTP/RPC enrollment (Web Enrollment / CES) | **Static (enabling config)** — detect role installed + EPA off; relay itself is **Out** | role/endpoint inventory; IIS EPA setting |
-| ESC9 | `CT_FLAG_NO_SECURITY_EXTENSION` on template (weak mapping) | **Static** | template `msPKI-Enrollment-Flag` |
+| ESC9 | `CT_FLAG_NO_SECURITY_EXTENSION` on a template enrollable by low-priv without manager approval (weak mapping) | **Static** | template `msPKI-Enrollment-Flag` + enroll ACL |
 | ESC10 | Weak certificate mappings on DCs (`StrongCertificateBindingEnforcement` / `CertificateMappingMethods`) | **Static** (needs DC registry in export) | DC registry export |
 | ESC11 | `IF_ENFORCEENCRYPTICERTREQUEST` off → RPC (ICertPassage) relay | **Static (enabling config)** — flag the flag; relay is **Out** | CA registry `InterfaceFlags` (`certutil -getreg`) |
 | ESC12 | *Unresolved* — no statically-detectable enabling configuration has been identified in canonical tooling or published research; the ESC number is preserved for continuity. Tracked as WI-026. | **Out (unresolved)** | n/a |

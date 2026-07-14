@@ -51,7 +51,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$COLLECTOR_VERSION = '0.5.0'
+$COLLECTOR_VERSION = '0.6.0'
 
 function _b64([string]$s) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($s)) }
 
@@ -289,6 +289,30 @@ function _caSecurityAces([string]$caName) {
   ,$out
 }
 
+# Pure bytes -> owner SID via the same RawSecurityDescriptor parser
+# _caSecurityAces uses. Factored out so it is unit-testable without mocking the
+# registry (ESC7 owner-based control, WI-037). Returns '' for absent/empty input.
+function _rawSdOwner([byte[]]$bytes) {
+  if (-not $bytes -or $bytes.Length -eq 0) { return '' }
+  try {
+    $rsd = New-Object Security.AccessControl.RawSecurityDescriptor(@([byte[]]$bytes), 0)
+    if ($rsd.Owner) { return [string]$rsd.Owner.Value }
+  } catch {}
+  ''
+}
+
+# The CA\Security owner (ESC7 owner-based control, WI-037). A low-priv owner of
+# the CA security descriptor can rewrite the DACL to grant itself Manage CA — the
+# CA-level analogue of ESC4/ESC5 owner control. Returns the owner SID string, or
+# '' when the SD is absent/malformed/has no owner. Reads the same registry value
+# as _caSecurityAces via the same RawSecurityDescriptor parser.
+function _caSecurityOwner([string]$caName) {
+  $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
+    "SYSTEM\CurrentControlSet\Services\CertSvc\Configuration\$caName")
+  if (-not $key) { return '' }
+  _rawSdOwner $key.GetValue('Security')
+}
+
 # --- CA registry via certutil (local, no network cred needed) ---------------
 # Parse certutil's own decoded "FLAG_NAME -- value" lines for EditFlags/InterfaceFlags.
 function _certutilFlags([string]$regpath) { _parseCertutilFlagLines (& certutil -getreg $regpath 2>$null) }
@@ -335,6 +359,9 @@ foreach ($r in (_search $enrollRoot '(objectClass=pKIEnrollmentService)')) {
     # future enhancement may populate this from the OS build.
     ca_patch_state = 'unknown'
     disabled_extensions = (@($disabledExt))
+    # CA\Security owner (ESC7 owner-based control, WI-037). Empty when the local
+    # registry SD could not be read; the ESC7 detector then skips owner control.
+    owner_sid      = (_caSecurityOwner $cn)
   }
 }
 

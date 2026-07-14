@@ -117,6 +117,26 @@ def test_diff_source_change_is_new_and_resolved_not_content() -> None:
     assert len(report.resolved) == 1
 
 
+def test_diff_identity_contract_is_check_subject_source() -> None:
+    """The drift identity is ``(check, subject, source)`` — a public contract.
+
+    ``source`` is load-bearing: it disambiguates same-subject findings (two CRLs
+    from one issuer) and is part of the stable ``diff --exit-code`` identity that
+    public/scheduled-scan consumers depend on. A cosmetic edit to a detector's
+    source string is therefore a *breaking change* to this contract — it produces
+    a false regression+resolved pair on the next diff. This test locks the
+    identity tuple so a refactor of ``_key`` cannot silently change what counts
+    as "the same finding"; treat detector ``source`` strings as stable API and
+    re-baseline consumers when one must change.
+    """
+    from adcs_lens.diff import _key
+
+    f = Finding(
+        check="C", severity=Severity.HIGH, title="t", subject="S", detail="d", source="SRC"
+    )
+    assert _key(f) == ("C", "S", "SRC")
+
+
 def test_diff_new_findings_sorted_worst_first() -> None:
     old: list[Finding] = []
     new = [_f("ESCx", "s1", Severity.LOW), _f("ESCy", "s2", Severity.CRITICAL)]

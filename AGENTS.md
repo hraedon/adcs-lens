@@ -100,13 +100,19 @@ ESC12 has no established static-detectability boundary — see
 `docs/threat-model.md`, tracked as WI-026).
 Phase-1 honesty/precision work closes the false-positive and false-negative
 edges: ESC7 expands broad rights (GenericAll/FullControl) via the `_COVERS`
-implication map so blanket CA control is not missed; the template weak-key
-detector is algorithm-aware (ECDSA templates skipped via CSP or unambiguous EC
-curve sizes 256/384/521); ESC4/ESC5 model owner-based control (a low-priv owner
-can rewrite the DACL); and ESC8 distinguishes EPA allow/none/unknown in the
-finding detail. The collector (v0.5.0) now emits template `csp` + `owner_sid`,
-PKI-object `owner_sid`, CA `ca_patch_state`, and decodes GENERIC_ALL on CA
-security.
+implication map so blanket CA control is not missed, and models **owner-based
+control** of `CA\Security` (a low-priv owner can rewrite the DACL → ManageCA);
+ESC9 is gated on low-priv enrollability + no manager approval (mirroring ESC1's
+FN-safe subset) so it no longer fires on non-enrollable / approval-required
+templates; the template weak-key detector is algorithm-aware (ECDSA templates
+skipped via CSP or unambiguous EC curve sizes 256/384/521); ESC4/ESC5 model
+owner-based control (a low-priv owner can rewrite the DACL); and ESC8
+distinguishes EPA allow/none/unknown in the finding detail. The collector
+(v0.6.0) now emits template `csp` + `owner_sid`, PKI-object `owner_sid`, CA
+`owner_sid` + `ca_patch_state`, and decodes GENERIC_ALL on CA security. The core
+warns (stderr, not fail) when a collector predates the minimum it expects
+(`MIN_COLLECTOR_VERSION`), and surfaces the ACL group-token-expansion caveat as
+an estate-level coverage note.
 ESC5 is
 negative-validated on the real CA with positive validation via the synthetic
 fixture; ESC8/ESC10/ESC11/ESC13/ESC14 are **positive-validated on the real lab**
