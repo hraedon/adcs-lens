@@ -2,10 +2,10 @@
 #
 # adcs-lens local identifier gate (project-initiation scaffold).
 #
-# Mirrors the CI `identifier-gate` job so a forbidden work-domain (work-domain)
-# identifier is caught BEFORE it lands in a commit. The CI gate only runs after
-# push, so by the time it flags a token it is already in history; this hook
-# closes that window.
+# Mirrors the CI `identifier-gate` job so a forbidden work-domain identifier
+# is caught BEFORE it lands in a commit. The CI gate only runs after push, so
+# by the time it flags a token it is already in history; this hook closes that
+# window.
 #
 # Activate (once per clone):   scripts/install-git-hooks.sh
 #
@@ -14,10 +14,10 @@
 #   2. <repo>/.identifiers-denylist.local            (gitignored, per-repo)
 #   3. ~/.config/agent-suite/forbidden-identifiers   (shared canonical work-domain set)
 #
-# The shared canonical denylist holds the work-domain (work-domain) identifiers only;
-# homelab/lab identifiers (hraedon, mvm*, ad.hraedon.com) are deliberately NOT in
-# it — lab stuff is allowed in public repos. Fail-open if no denylist is found so
-# a fresh clone is not bricked; CI remains the hard gate.
+# The shared canonical denylist holds the work-domain identifiers only; homelab/
+# lab identifiers (hraedon, mvm*, ad.hraedon.com) are deliberately NOT in it —
+# lab stuff is allowed in public repos. Fail-open if no denylist is found so a
+# fresh clone is not bricked; CI remains the hard gate.
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
