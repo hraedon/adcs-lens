@@ -9,7 +9,8 @@ import pytest
 
 from adcs_lens.cli import main
 from adcs_lens.detection import Finding
-from adcs_lens.display import render_sarif
+from adcs_lens.diff import diff_findings
+from adcs_lens.display import render_diff_sarif, render_sarif
 from adcs_lens.model import CrlTier, Severity
 
 
@@ -153,10 +154,47 @@ def test_render_sarif_source_in_logical_locations() -> None:
     findings = [_f("ESC6", Severity.CRITICAL, source="template 'T': enroll ACL")]
     doc = json.loads(render_sarif(findings))
     result = doc["runs"][0]["results"][0]
-    assert "locations" not in result
-    loc = result["logicalLocations"][0]
+    loc = result["locations"][0]["logicalLocations"][0]
     assert loc["fullyQualifiedName"] == "template 'T': enroll ACL"
     assert loc["name"] == "subj"
+
+
+def test_render_sarif_includes_artifact_location() -> None:
+    findings = [_f("ESC6", Severity.CRITICAL, source="template 'T': enroll ACL")]
+    doc = json.loads(render_sarif(findings))
+    result = doc["runs"][0]["results"][0]
+    assert result["locations"][0]["physicalLocation"]["artifactLocation"] == {
+        "uri": "file:///adcs-lens/template%20%27T%27%3A%20enroll%20ACL"
+    }
+
+
+def test_render_sarif_esc7_includes_sid_property() -> None:
+    detail = (
+        "Domain Users holds Manage CA (full CA control) on this CA. "
+        "(S-1-5-21-1111111111-2222222222-3333333333-513)"
+    )
+    findings = [_f("ESC7", Severity.CRITICAL, detail=detail)]
+    doc = json.loads(render_sarif(findings))
+    result = doc["runs"][0]["results"][0]
+    assert result["properties"] == {"sid": "S-1-5-21-1111111111-2222222222-3333333333-513"}
+
+
+def test_render_sarif_esc7_owner_sid_extracted_from_parentheses() -> None:
+    detail = (
+        "The owner of this CA's security descriptor "
+        "(S-1-5-21-1-2-3-512) is a low-privilege principal."
+    )
+    findings = [_f("ESC7", Severity.CRITICAL, detail=detail)]
+    doc = json.loads(render_sarif(findings))
+    result = doc["runs"][0]["results"][0]
+    assert result["properties"] == {"sid": "S-1-5-21-1-2-3-512"}
+
+
+def test_render_sarif_esc7_no_sid_property_when_not_present() -> None:
+    findings = [_f("ESC7", Severity.HIGH, detail="No SID in this detail.")]
+    doc = json.loads(render_sarif(findings))
+    result = doc["runs"][0]["results"][0]
+    assert "properties" not in result
 
 
 def test_render_sarif_empty_findings() -> None:
@@ -199,3 +237,31 @@ def test_render_sarif_is_deterministic() -> None:
     first = render_sarif(findings)
     second = render_sarif(findings)
     assert first == second
+
+
+_SCHEMA = json.loads(
+    (Path(__file__).resolve().parent / "fixtures" / "sarif-2.1.0.json").read_text()
+)
+
+
+def test_render_sarif_validates_against_schema() -> None:
+    try:
+        import jsonschema
+    except ImportError:
+        pytest.skip("jsonschema not installed")
+    findings = [_f("ESC6", Severity.CRITICAL), _f("ESC8", Severity.HIGH)]
+    doc = json.loads(render_sarif(findings))
+    jsonschema.validate(doc, _SCHEMA)
+
+
+def test_render_diff_sarif_validates_against_schema() -> None:
+    try:
+        import jsonschema
+    except ImportError:
+        pytest.skip("jsonschema not installed")
+    report = diff_findings(
+        [_f("ESC8", severity=Severity.HIGH, subject="ca01")],
+        [_f("ESC1", severity=Severity.CRITICAL, subject="TemplA")],
+    )
+    doc = json.loads(render_diff_sarif(report))
+    jsonschema.validate(doc, _SCHEMA)

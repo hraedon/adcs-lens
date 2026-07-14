@@ -57,6 +57,16 @@ Describe '_parseAces (Windows / System.DirectoryServices)' {
         $mine[0].rights | Should -Contain 'WritePropertyAll'
     }
 
+    It 'maps a scoped WriteProperty ACE to WriteProperty:<guid> (WI-019)' {
+        # A non-zero ObjectType scopes the write to one property; the collector
+        # emits 'WriteProperty:<guid>' (lower-cased) so the core can match it
+        # against the dangerous-property GUID map (ESC4 scoped-write path).
+        $nameFlagGuid = [Guid]'ea1dddc4-60ff-416e-8cc0-17cee534bce7'
+        $bytes = New-Sd @((Rule $TEST_SID 'WriteProperty' 'Allow' $nameFlagGuid))
+        $mine = @((_parseAces $bytes) | Where-Object { $_.trustee_sid -eq $TEST_SID })
+        $mine[0].rights | Should -Contain 'WriteProperty:ea1dddc4-60ff-416e-8cc0-17cee534bce7'
+    }
+
     It 'preserves GenericAll and the Deny ACE type' {
         $bytes = New-Sd @((Rule $TEST_SID 'GenericAll' 'Deny' $ZERO_GUID))
         $mine = @((_parseAces $bytes) | Where-Object { $_.trustee_sid -eq $TEST_SID })

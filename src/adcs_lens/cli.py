@@ -16,7 +16,9 @@ from adcs_lens import __version__
 from adcs_lens.detection import is_degradation_note, run_all
 from adcs_lens.diff import diff_findings
 from adcs_lens.display import (
+    render_diff_html,
     render_diff_json,
+    render_diff_sarif,
     render_diff_text,
     render_html,
     render_json,
@@ -25,6 +27,12 @@ from adcs_lens.display import (
 )
 from adcs_lens.ingest import IngestError, collector_compat_warning, ingest
 from adcs_lens.model import SEVERITY_RANK, Estate, Severity
+from adcs_lens.suppression import (
+    apply_suppressions,
+    format_suppression_summary,
+    load_suppressions,
+    suppression_summary,
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -72,13 +80,34 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Exit non-zero when any finding meets or exceeds --severity (for CI gating).",
     )
+    p_doctor.add_argument(
+        "--suppressions",
+        metavar="FILE",
+        help="JSON file of risk-accepted findings to exclude from the --exit-code gate.",
+    )
+    p_doctor.add_argument(
+        "--narrate",
+        action="store_true",
+        help="Print a deterministic executive summary to stderr after the findings.",
+    )
 
     p_diff = sub.add_parser(
         "diff", help="Drift between two exports (Stance 2): what got worse / better."
     )
     p_diff.add_argument("old_export", help="The earlier (baseline) export directory.")
     p_diff.add_argument("new_export", help="The later (current) export directory.")
-    p_diff.add_argument("--json", action="store_true", help="Emit the JSON envelope.")
+    fmt = p_diff.add_mutually_exclusive_group()
+    fmt.add_argument("--json", action="store_true", help="Emit the JSON envelope.")
+    fmt.add_argument(
+        "--sarif",
+        action="store_true",
+        help="Emit SARIF v2.1.0 output for CI / GRC integration.",
+    )
+    fmt.add_argument(
+        "--html",
+        action="store_true",
+        help="Emit a self-contained HTML drift report.",
+    )
     p_diff.add_argument(
         "--warn-days",
         type=int,
@@ -134,12 +163,27 @@ def _cmd_doctor(
     warn_days: int,
     severity: str,
     exit_code: bool,
+    suppressions_path: str | None,
+    narrate: bool = False,
 ) -> int:
     min_rank = SEVERITY_RANK[Severity(severity)]
 
     estate = ingest(export_dir)
     _compat_warn(estate)
     all_findings = run_all(estate, warn_days=warn_days)
+
+    suppression_payload: dict[str, object] | None = None
+    if suppressions_path is not None:
+        try:
+            rules = load_suppressions(suppressions_path)
+        except ValueError as exc:
+            return _error(str(exc))
+        result = apply_suppressions(all_findings, rules)
+        all_findings = list(result.remaining)
+        if result.suppressed or result.expired:
+            print(format_suppression_summary(result), file=sys.stderr)
+        suppression_payload = suppression_summary(result, rules)
+
     # Lower rank == worse; keep findings at or above the requested floor.
     findings = [f for f in all_findings if SEVERITY_RANK[f.severity] <= min_rank]
 
@@ -148,9 +192,14 @@ def _cmd_doctor(
     elif as_html:
         print(render_html(findings))
     elif as_json:
-        print(render_json(findings))
+        print(render_json(findings, suppressions=suppression_payload))
     else:
         print(render_text(findings))
+
+    if narrate:
+        from adcs_lens.narration import generate_executive_summary
+
+        print(generate_executive_summary(findings), file=sys.stderr)
 
     # Coverage-gap notes (e.g. LIFECYCLE_NOT_EVALUATED) meet the threshold but are
     # not posture findings, so they do not trip the --exit-code gate.
@@ -164,6 +213,8 @@ def _cmd_diff(
     new_export: str,
     *,
     as_json: bool,
+    as_sarif: bool,
+    as_html: bool,
     warn_days: int,
     exit_code: bool,
 ) -> int:
@@ -179,11 +230,18 @@ def _cmd_diff(
     new = run_all(new_estate, now=now, warn_days=warn_days)
     report = diff_findings(old, new)
 
-    print(render_diff_json(report) if as_json else render_diff_text(report))
+    if as_sarif:
+        print(render_diff_sarif(report))
+    elif as_html:
+        print(render_diff_html(report))
+    elif as_json:
+        print(render_diff_json(report))
+    else:
+        print(render_diff_text(report))
 
     # Degradation notes (coverage-gap INFO) are excluded from `regressions` by
     # the DriftReport property itself, so the gate agrees with the JSON/text
-    # summary and with `doctor --exit-code` (cli.py:141).
+    # summary and with `doctor --exit-code` (cli.py:206).
     if exit_code and report.regressions:
         return 1
     return 0
@@ -208,12 +266,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 warn_days=args.warn_days,
                 severity=args.severity,
                 exit_code=args.exit_code,
+                suppressions_path=args.suppressions,
+                narrate=args.narrate,
             )
         if args.command == "diff":
             return _cmd_diff(
                 args.old_export,
                 args.new_export,
                 as_json=args.json,
+                as_sarif=args.sarif,
+                as_html=args.html,
                 warn_days=args.warn_days,
                 exit_code=args.exit_code,
             )

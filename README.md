@@ -101,16 +101,19 @@ fields are `None` and those checks degrade to an explicit coverage note rather
 than producing wrong answers.
 
 ```bash
-# From the v1.0.0 release tag (recommended):
-pip install "adcs-lens[certs] @ git+https://github.com/hraedon/adcs-lens.git@v1.0.0"
+# From the latest main branch (recommended):
+pip install "adcs-lens[certs] @ git+https://github.com/hraedon/adcs-lens.git"
 
 # Or, from a checkout:
 pip install -e ".[certs]"
+
+# From PyPI (available after the first release):
+# pip install "adcs-lens[certs]"
 ```
 
-This installs the `adcs-lens` command. PyPI publishing is a planned follow-up;
-until then install from git or vendor the single `src/adcs_lens/` package — the
-dependency-free core is well suited to an air-gapped / tier-0 analysis host.
+This installs the `adcs-lens` command. The dependency-free core is well suited
+to an air-gapped / tier-0 analysis host — vendor the single `src/adcs_lens/`
+package when network access is unavailable.
 
 ## Workflow
 

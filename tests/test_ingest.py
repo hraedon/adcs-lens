@@ -20,7 +20,7 @@ def test_manifest_and_counts(json_export: Path) -> None:
     # hyphenated pass name the detectors actually gate on (esc10-dc-registry).
     assert "esc10-dc-registry" not in estate.manifest.skipped_passes
     assert len(estate.cas) == 2
-    assert len(estate.templates) == 5
+    assert len(estate.templates) == 6
     assert len(estate.dcs) == 2
 
 
@@ -28,7 +28,7 @@ def test_bom_tolerant(json_export: Path) -> None:
     # collector-manifest.json is written with a UTF-8 BOM; ingest must not choke.
     raw = (json_export / "collector-manifest.json").read_bytes()
     assert raw[:3] == b"\xef\xbb\xbf", "fixture should exercise the BOM path"
-    assert ingest(json_export).manifest.collector_version == "0.6.0-fixture"
+    assert ingest(json_export).manifest.collector_version == "0.6.1-fixture"
 
 
 def test_ca_flags_and_kind(json_export: Path) -> None:

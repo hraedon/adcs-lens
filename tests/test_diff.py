@@ -10,7 +10,12 @@ import pytest
 from adcs_lens.cli import main
 from adcs_lens.detection import Finding
 from adcs_lens.diff import diff_findings
-from adcs_lens.display import render_diff_json, render_diff_text
+from adcs_lens.display import (
+    render_diff_html,
+    render_diff_json,
+    render_diff_sarif,
+    render_diff_text,
+)
 from adcs_lens.model import Severity
 
 
@@ -299,3 +304,179 @@ def test_diff_json_emits_content_changed_field() -> None:
     entry = env["changed"][0]
     assert entry["worsened"] is False
     assert entry["content_changed"] is True
+
+
+def test_render_diff_sarif_empty_report() -> None:
+    report = diff_findings([], [])
+    doc = json.loads(render_diff_sarif(report))
+    assert doc["version"] == "2.1.0"
+    assert doc["runs"][0]["results"] == []
+    assert doc["runs"][0]["tool"]["driver"]["rules"] == []
+
+
+def test_render_diff_sarif_new_finding_is_error() -> None:
+    report = diff_findings([], [_f("ESC8", "ca01", Severity.HIGH)])
+    doc = json.loads(render_diff_sarif(report))
+    results = doc["runs"][0]["results"]
+    assert len(results) == 1
+    assert results[0]["level"] == "error"
+    assert results[0]["ruleId"] == "ESC8"
+    assert results[0]["locations"][0]["physicalLocation"]["artifactLocation"][
+        "uri"
+    ].startswith("file:///adcs-lens/")
+
+
+def test_render_diff_sarif_uses_severity_mapping_for_worsened_and_resolved() -> None:
+    # MEDIUM -> HIGH is a worsened drift; the new finding's severity (HIGH)
+    # maps to SARIF "error".
+    old = [_f("ESC10", "dc01", Severity.MEDIUM)]
+    new = [_f("ESC10", "dc01", Severity.HIGH)]
+    report = diff_findings(old, new)
+    doc = json.loads(render_diff_sarif(report))
+    results = doc["runs"][0]["results"]
+    assert len(results) == 1
+    assert results[0]["level"] == "error"
+
+    # A fully resolved LOW finding maps to SARIF "note" via _SARIF_LEVEL.
+    report = diff_findings([_f("ESC10", "dc01", Severity.LOW)], [])
+    doc = json.loads(render_diff_sarif(report))
+    results = doc["runs"][0]["results"]
+    assert len(results) == 1
+    assert results[0]["level"] == "note"
+
+
+def test_render_diff_sarif_baseline_state() -> None:
+    # New finding -> baselineState "new"
+    report = diff_findings([], [_f("ESC8", "ca01", Severity.HIGH)])
+    doc = json.loads(render_diff_sarif(report))
+    assert doc["runs"][0]["results"][0]["baselineState"] == "new"
+
+    # Resolved finding -> baselineState "absent"
+    report = diff_findings([_f("ESC8", "ca01", Severity.HIGH)], [])
+    doc = json.loads(render_diff_sarif(report))
+    assert doc["runs"][0]["results"][0]["baselineState"] == "absent"
+
+    # Changed finding -> baselineState "updated"
+    old = [_f("ESC10", "dc01", Severity.MEDIUM)]
+    new = [_f("ESC10", "dc01", Severity.HIGH)]
+    report = diff_findings(old, new)
+    doc = json.loads(render_diff_sarif(report))
+    assert doc["runs"][0]["results"][0]["baselineState"] == "updated"
+
+
+def test_render_diff_sarif_content_change_uses_new_severity() -> None:
+    report = diff_findings(
+        old=[_f("ESC1", "TemplA", Severity.LOW)],
+        new=[
+            Finding(
+                check="ESC1",
+                severity=Severity.MEDIUM,
+                title="ESC1 on TemplA",
+                subject="TemplA",
+                detail="changed detail",
+                source="s",
+            )
+        ],
+    )
+    doc = json.loads(render_diff_sarif(report))
+    results = doc["runs"][0]["results"]
+    assert len(results) == 1
+    assert results[0]["level"] == "warning"
+
+
+def test_render_diff_sarif_rules_deduplicated_sorted() -> None:
+    report = diff_findings(
+        [],
+        [
+            _f("ESC8", "ca01", Severity.HIGH),
+            _f("ESC1", "TemplA", Severity.CRITICAL),
+            _f("ESC8", "ca02", Severity.HIGH),
+        ],
+    )
+    doc = json.loads(render_diff_sarif(report))
+    rules = doc["runs"][0]["tool"]["driver"]["rules"]
+    assert [r["id"] for r in rules] == ["ESC1", "ESC8"]
+
+
+def test_render_diff_sarif_is_deterministic() -> None:
+    report = diff_findings([], [_f("ESC1", "TemplA", Severity.HIGH)])
+    first = render_diff_sarif(report)
+    second = render_diff_sarif(report)
+    assert first == second
+
+
+def test_render_diff_html_selfcontained_document() -> None:
+    report = diff_findings([], [_f("ESC1", "TemplA", Severity.HIGH)])
+    out = render_diff_html(report)
+    assert out.startswith("<!DOCTYPE html>")
+    assert out.rstrip().endswith("</html>")
+    assert "<style>" in out
+    assert '<link rel="stylesheet"' not in out
+
+
+def test_render_diff_html_summary_counts() -> None:
+    report = diff_findings(
+        old=[_f("ESC8", "ca01", Severity.HIGH)],
+        new=[_f("ESC1", "TemplA", Severity.CRITICAL)],
+    )
+    out = render_diff_html(report)
+    assert "+1 new" in out
+    assert "-1 resolved" in out
+    assert "~0 changed" in out
+    assert "=0 unchanged" in out
+
+
+def test_render_diff_html_new_finding_has_badge_and_consequence() -> None:
+    report = diff_findings([], [_f("ESC1", "TemplA", Severity.CRITICAL)])
+    out = render_diff_html(report)
+    assert 'class="diff-badge new"' in out
+    assert "New" in out
+    assert "In plain terms." in out
+    assert "How to fix." in out
+
+
+def test_render_diff_html_changed_finding_shows_worsened_badge() -> None:
+    old = [_f("ESC10", "dc01", Severity.MEDIUM)]
+    new = [_f("ESC10", "dc01", Severity.HIGH)]
+    report = diff_findings(old, new)
+    out = render_diff_html(report)
+    assert 'class="diff-badge worsened"' in out
+    assert "medium &rarr; high" in out
+
+
+def test_cli_diff_sarif_and_json_mutually_exclusive(
+    json_export: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(["diff", str(json_export), str(json_export), "--sarif", "--json"])
+    assert exc_info.value.code == 2
+    assert "not allowed with" in capsys.readouterr().err
+
+
+def test_cli_diff_html_and_sarif_mutually_exclusive(
+    json_export: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(["diff", str(json_export), str(json_export), "--html", "--sarif"])
+    assert exc_info.value.code == 2
+    assert "not allowed with" in capsys.readouterr().err
+
+
+def test_cli_diff_sarif_renders_on_identical_exports(
+    json_export: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc = main(["diff", str(json_export), str(json_export), "--sarif"])
+    assert rc == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["version"] == "2.1.0"
+    assert doc["runs"][0]["results"] == []
+
+
+def test_cli_diff_html_renders_on_identical_exports(
+    json_export: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc = main(["diff", str(json_export), str(json_export), "--html"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.startswith("<!DOCTYPE html>")
+    assert "No drift" in out

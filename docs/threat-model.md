@@ -56,6 +56,7 @@ under-served by the offensive tooling entirely:
 | CRL signing expiry | The CRL signing cert expiring — silent estate-wide auth failure | **Static** | CA config / CRL |
 | CRL freshness | Published CRL stale or overdue vs. its validity period | **Static** | exported CRL + config |
 | CDP / AIA reachability | Distribution points declared but unreachable/misconfigured | **Static (declared)** — config only; no live fetch | CA config |
+| OCSP URL presence | CA certificate lacks an OCSP responder URL in AIA | **Static** | CA cert AIA extension |
 | Weak signing algorithm | CA signing with SHA-1 / MD5 | **Static** | CA cert / config |
 | Weak key length | CA or template minimum key size below policy (RSA baseline; ECDSA templates skipped) | **Static** | CA cert; template `msPKI-Minimal-Key-Size` + CSP |
 | Audit configuration | CA auditing disabled or under-scoped | **Static** | CA registry `AuditFilter` |

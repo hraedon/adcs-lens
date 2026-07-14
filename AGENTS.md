@@ -94,9 +94,12 @@ endpoints (Web Enrollment / CES bindings + Windows-auth + Extended Protection
 altSecurityIdentities + `esc10-dc-registry` per-DC KDC
 StrongCertificateBindingEnforcement and Schannel CertificateMappingMethods via
 WMI StdRegProv with explicit creds); its **core passes are validated
-end-to-end against a live enterprise CA**, but the v0.6.0 CA `owner_sid` capture
-is additive and **not yet live-validated** (Pester-unit-tested; treat the ESC7
-owner finding as unconfirmed until the next live run).
+end-to-end against a live enterprise CA** (LABCA, `WORK-DOMAIN.local`), and the
+v0.6.1 collector's `owner_sid` capture (CA + template + PKI-object) is
+**live-validated** — the CA owner is BUILTIN\Administrators (high-priv), so
+ESC7 owner-based control correctly does not fire. The v0.6.1 fix corrects an
+LDAP `SecurityMasks` bug that left template/PKI-object owner_sids empty in
+v0.6.0; the core degrades honestly either way.
 ESC15 (EKUwu / CVE-2024-49019) flags schema v1 templates a low-priv
 principal can enroll in, with severity tracking CA patch state (HIGH unpatched /
 MEDIUM unknown / suppressed patched) — the collector emits `ca_patch_state`

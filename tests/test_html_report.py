@@ -207,3 +207,40 @@ def test_render_html_counts_in_summary() -> None:
     assert "High 1" in out
     # Band headings also carry per-band counts.
     assert "Critical <span class=\"count\">(2)</span>" in out
+
+
+def test_render_html_includes_table_of_contents() -> None:
+    findings = [
+        _f("ESC1", Severity.CRITICAL),
+        _f("ESC9", Severity.HIGH),
+        _f("ESC8", Severity.MEDIUM),
+    ]
+    out = render_html(findings)
+    assert '<nav class="toc"' in out
+    # TOC links to each band that has findings.
+    assert 'href="#critical"' in out
+    assert 'href="#high"' in out
+    assert 'href="#medium"' in out
+    # TOC shows counts (inside a count span).
+    assert 'Critical <span class="count">(1)</span>' in out
+    assert 'High <span class="count">(1)</span>' in out
+    assert 'Medium <span class="count">(1)</span>' in out
+    # Bands have matching ids.
+    assert '<section class="band sev-critical" id="critical"' in out
+    assert '<section class="band sev-high" id="high"' in out
+    assert '<section class="band sev-medium" id="medium"' in out
+
+
+def test_render_html_toc_omits_empty_severity_bands() -> None:
+    findings = [_f("ESC1", Severity.CRITICAL)]
+    out = render_html(findings)
+    assert 'href="#critical"' in out
+    assert 'href="#high"' not in out
+    assert 'href="#medium"' not in out
+    assert 'href="#low"' not in out
+    assert 'href="#info"' not in out
+
+
+def test_render_html_toc_not_shown_when_no_findings() -> None:
+    out = render_html([])
+    assert '<nav class="toc"' not in out

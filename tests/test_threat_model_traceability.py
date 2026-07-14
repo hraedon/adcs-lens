@@ -24,11 +24,12 @@ HYGIENE_STATUS: dict[str, str | None] = {
     "CA cert expiry": "CA_CERT_EXPIRY",
     "CRL signing expiry": "CA_CERT_EXPIRY",
     "CRL freshness": "CRL_EXPIRY",
-    "CDP / AIA reachability": None,
+    "CDP / AIA reachability": "CDP_AIA_ABSENT",
+    "OCSP URL presence": "OCSP_URL_ABSENT",
     "Weak signing algorithm": "WEAK_SIG_ALG",
     "Weak key length": "WEAK_KEY_SIZE",
     "Audit configuration": "CA_AUDIT_DISABLED",
-    "Orphaned / unused templates": None,
+    "Orphaned / unused templates": "ORPHANED_TEMPLATE",
 }
 
 

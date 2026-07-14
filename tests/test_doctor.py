@@ -134,3 +134,196 @@ def test_degradation_note_shown_in_json_but_not_gated(
 def test_doctor_exit_code_without_flag_stays_zero(json_export: Path) -> None:
     # Findings exist, but absent --exit-code the command still reports success.
     assert main(["doctor", str(json_export)]) == 0
+
+
+def test_doctor_suppressions_filter_and_exit_code(
+    json_export: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The fixture has two CRITICAL findings on the issuing CA (ESC6 and
+    # CA_AUDIT_DISABLED). Suppressing both should remove them from the output
+    # and keep --exit-code clean at 'critical'.
+    supp = tmp_path / "suppressions.json"
+    supp.write_text(
+        json.dumps(
+            {
+                "suppressions": [
+                    {
+                        "check": "ESC6",
+                        "subject": "LAB Issuing CA",
+                        "reason": "legacy flag accepted by CAB",
+                        "expires": "2026-12-31",
+                    },
+                    {
+                        "check": "CA_AUDIT_DISABLED",
+                        "subject": "LAB Issuing CA",
+                        "reason": "audit handled by separate SOC pipeline",
+                        "expires": "2026-12-31",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    rc = main(
+        [
+            "doctor",
+            str(json_export),
+            "--json",
+            "--exit-code",
+            "--severity",
+            "critical",
+            "--suppressions",
+            str(supp),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    out = json.loads(captured.out)
+    checks = {f["check"] for f in out["findings"]}
+    assert "ESC6" not in checks
+    assert "CA_AUDIT_DISABLED" not in checks
+    assert "suppressed" in captured.err
+    assert "[ESC6]" in captured.err
+
+
+def test_doctor_suppressions_invalid_file(
+    json_export: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    supp = tmp_path / "bad.json"
+    supp.write_text("not json", encoding="utf-8")
+    rc = main(["doctor", str(json_export), "--suppressions", str(supp)])
+    assert rc != 0
+    assert "malformed JSON" in capsys.readouterr().err
+
+
+def test_doctor_narrate_prints_executive_summary_to_stderr(
+    json_export: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc = main(["doctor", str(json_export), "--narrate"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "EXECUTIVE SUMMARY" in captured.err
+    assert "adcs-lens doctor" in captured.out
+
+
+def test_doctor_suppressions_expired_rule_warns(
+    json_export: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    supp = tmp_path / "supp.json"
+    supp.write_text(
+        json.dumps(
+            {
+                "suppressions": [
+                    {
+                        "check": "ESC6",
+                        "subject": "LAB Issuing CA",
+                        "reason": "expired acceptance",
+                        "expires": "2025-01-01",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    rc = main(["doctor", str(json_export), "--json", "--suppressions", str(supp)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    out = json.loads(captured.out)
+    # The expired rule did not suppress ESC6, so it remains in the output.
+    assert any(f["check"] == "ESC6" for f in out["findings"])
+    assert "expired" in captured.err
+    assert "2025-01-01" in captured.err
+
+
+def test_doctor_json_includes_suppression_summary(
+    json_export: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    supp = tmp_path / "suppressions.json"
+    supp.write_text(
+        json.dumps(
+            {
+                "suppressions": [
+                    {
+                        "check": "ESC6",
+                        "subject": "LAB Issuing CA",
+                        "reason": "legacy flag accepted by CAB",
+                        "expires": "2026-12-31",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    rc = main(["doctor", str(json_export), "--json", "--suppressions", str(supp)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    envelope = json.loads(captured.out)
+    assert "suppressions" in envelope
+    summary = envelope["suppressions"]
+    assert summary["suppressed_count"] == 1
+    assert summary["suppressed"][0] == {
+        "check": "ESC6",
+        "subject": "LAB Issuing CA",
+        "reason": "legacy flag accepted by CAB",
+    }
+    assert summary["expired_count"] == 0
+    assert summary["warnings"] == []
+    # The suppressed finding is not in the findings array.
+    assert not any(f["check"] == "ESC6" for f in envelope["findings"])
+
+
+def test_doctor_narrate_uses_post_suppression_findings(
+    json_export: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    supp = tmp_path / "suppressions.json"
+    supp.write_text(
+        json.dumps(
+            {
+                "suppressions": [
+                    {
+                        "check": "ESC6",
+                        "subject": "LAB Issuing CA",
+                        "reason": "legacy flag accepted by CAB",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    rc = main(["doctor", str(json_export), "--narrate", "--suppressions", str(supp)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "EXECUTIVE SUMMARY" in captured.err
+    # The suppression summary is on stderr too; isolate the executive summary.
+    executive = captured.err.split("EXECUTIVE SUMMARY", 1)[1]
+    # ESC6 on LAB Issuing CA was suppressed; the check id must not appear in narration.
+    assert "ESC6" not in executive
+
+
+def test_doctor_json_includes_suppressions_key_even_when_nothing_matched(
+    json_export: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    supp = tmp_path / "suppressions.json"
+    supp.write_text(
+        json.dumps(
+            {
+                "suppressions": [
+                    {
+                        "check": "NONEXISTENT_CHECK",
+                        "subject": "no-such-subject",
+                        "reason": "won't match anything",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    rc = main(["doctor", str(json_export), "--json", "--suppressions", str(supp)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    envelope = json.loads(captured.out)
+    assert "suppressions" in envelope
+    summary = envelope["suppressions"]
+    assert summary["suppressed_count"] == 0
+    assert summary["suppressed"] == []
+    assert summary["expired_count"] == 0

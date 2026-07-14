@@ -198,6 +198,12 @@ class CertLifecycle:
     sig_alg: str
     key_bits: int | None
     key_alg: str
+    # Revocation/chain URLs parsed from the AIA and CRL Distribution Points
+    # extensions. Empty tuples when the extension is absent or the cert was
+    # parsed by an older certs.py that did not extract them (WI-022 / WI-032).
+    ocsp_urls: tuple[str, ...] = ()
+    cdp_urls: tuple[str, ...] = ()
+    aia_urls: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

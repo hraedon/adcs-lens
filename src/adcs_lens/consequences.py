@@ -502,6 +502,48 @@ CONSEQUENCES: dict[str, ConsequenceEntry] = {
             "the requester's full group token expanded."
         ),
     ),
+    "ORPHANED_TEMPLATE": ConsequenceEntry(
+        check="ORPHANED_TEMPLATE",
+        summary="A certificate template exists in AD but no CA offers it for enrollment.",
+        consequence=(
+            "The template is not directly exploitable, but it expands the attack surface and "
+            "signals hygiene drift. A CA operator can publish it at any time, potentially "
+            "exposing a vulnerable configuration that was thought to be retired."
+        ),
+        remediation=(
+            "Remove the template if it is no longer needed, or publish it under the intended CA "
+            "and review its configuration."
+        ),
+    ),
+    "OCSP_URL_ABSENT": ConsequenceEntry(
+        check="OCSP_URL_ABSENT",
+        summary="An issuing CA certificate carries no OCSP responder URL in its AIA extension.",
+        consequence=(
+            "OCSP-based revocation checking is not available for certificates issued by this CA. "
+            "Clients fall back to CRL fetching, which may not be feasible if CRL distribution is "
+            "also misconfigured. This is a posture note, not a vulnerability — many CAs use "
+            "only CRL."
+        ),
+        remediation=(
+            "Add an OCSP responder URL to the CA certificate's AIA extension if the CA should "
+            "support OCSP-based revocation, or confirm that CRL-based revocation is sufficient."
+        ),
+    ),
+    "CDP_AIA_ABSENT": ConsequenceEntry(
+        check="CDP_AIA_ABSENT",
+        summary=(
+            "An issuing CA certificate lacks CRL Distribution Point or AIA extension URLs."
+        ),
+        consequence=(
+            "Clients that cannot fetch a CRL have no revocation path and will reject the chain "
+            "or silently skip revocation checking. Without an AIA URL, clients cannot build the "
+            "certificate chain to the issuer. Both undermine the PKI's reliability."
+        ),
+        remediation=(
+            "Publish CDP and AIA URLs on the CA certificate and reissue if necessary, then verify "
+            "the URLs are reachable from client systems."
+        ),
+    ),
 }
 
 

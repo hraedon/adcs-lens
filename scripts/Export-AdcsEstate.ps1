@@ -51,7 +51,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$COLLECTOR_VERSION = '0.6.0'
+$COLLECTOR_VERSION = '0.6.2'
 
 function _b64([string]$s) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($s)) }
 
@@ -76,8 +76,10 @@ function _ldapRoot([string]$container) {
 function _search([DirectoryServices.DirectoryEntry]$root, [string]$filter) {
   $s = New-Object DirectoryServices.DirectorySearcher($root)
   $s.Filter = $filter; $s.PageSize = 200; $s.SearchScope = 'Subtree'
-  # Request the DACL so nTSecurityDescriptor comes back with ACEs (read-only).
-  $s.SecurityMasks = [DirectoryServices.SecurityMasks]'Dacl'
+  # Request the DACL *and* Owner so nTSecurityDescriptor comes back with ACEs
+  # and the owner SID (read-only). Owner is needed for ESC4/ESC5 owner-based
+  # control — without it the owner_sid is always empty (v0.6.0 bug fix).
+  $s.SecurityMasks = [DirectoryServices.SecurityMasks]'Dacl,Owner'
   $s.FindAll()
 }
 
@@ -179,7 +181,10 @@ function _classifyApp([string]$p) {
 # ObjectType on a WriteProperty ACE means "write *all* properties" (blanket) —
 # emitted as 'WritePropertyAll' so ESC4 can flag it (a blanket WriteProperty can
 # rewrite msPKI-Certificate-Name-Flag → ESC1). A non-zero ObjectType scopes the
-# write to one property/property-set and stays plain 'WriteProperty' (benign).
+# write to one property/property-set and is emitted as 'WriteProperty:<guid>'
+# (lower-cased) so the core can match it against the dangerous-property GUID map
+# (WI-019). A bare 'WriteProperty' (no GUID) from an older collector stays
+# excluded — the scope is unknown.
 $ENROLL_GUID     = '0e10c968-78fb-11d2-90d4-00c04f79dc55'
 $AUTOENROLL_GUID = 'a05b8cc2-17b1-4cc8-8b00-94f99c9c2cca'
 $ZERO_GUID       = '00000000-0000-0000-0000-000000000000'
@@ -203,7 +208,7 @@ function _parseAces([byte[]]$sdBytes) {
         else                              { $rights += 'ExtendedRight' }
       } elseif ($flag -eq 'WriteProperty') {
         if ($ot -eq $ZERO_GUID) { $rights += 'WritePropertyAll' }  # blanket: all properties
-        else                    { $rights += 'WriteProperty' }     # scoped to one property/set
+        else                    { $rights += "WriteProperty:$($ot.ToLower())" }  # scoped to one property/set
       } else {
         $rights += $flag
       }
@@ -226,7 +231,7 @@ function _objAcl([string]$dn, [string]$kind) {
   $de = New-Object DirectoryServices.DirectoryEntry("LDAP://$dn", $LdapUser, $LdapPass)
   $s = New-Object DirectoryServices.DirectorySearcher($de)
   $s.SearchScope = 'Base'; $s.Filter = '(objectClass=*)'
-  $s.SecurityMasks = [DirectoryServices.SecurityMasks]'Dacl'
+  $s.SecurityMasks = [DirectoryServices.SecurityMasks]'Dacl,Owner'
   $r = $null
   try { $r = $s.FindOne() } catch { return $null }   # object absent / no read
   if (-not $r) { return $null }

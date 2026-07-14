@@ -48,7 +48,7 @@ def build_export(
     _write_json(
         base / "collector-manifest.json",
         {
-            "collector_version": "0.6.0-fixture",
+            "collector_version": "0.6.1-fixture",
             "collected_at": now.isoformat(),
             "host": "LABCA01",
             "domain": DOMAIN,
@@ -223,6 +223,35 @@ def build_export(
                 "acl_obtained": True,
                 "owner_sid": LOW_PRIV_SID,
             },
+            {
+                # Property-scoped WriteProperty on a dangerous property (WI-019):
+                # a low-priv trustee holds a scoped WriteProperty whose ObjectType
+                # is the msPKI-Certificate-Name-Flag schemaIDGUID. This lets them
+                # flip ENROLLEE_SUPPLIES_SUBJECT on -> an ESC4 path. The collector
+                # (v0.6.2+) emits this as 'WriteProperty:<guid>'; the core matches
+                # it against the dangerous-property GUID map.
+                "name": "LabScopedWriteTemplate",
+                "display_name": "Lab Scoped Write Template",
+                "schema_version": 2,
+                "oid": "1.3.6.1.4.1.311.21.8.1.2.3.4.121",
+                "ekus": ["1.3.6.1.5.5.7.3.1"],  # Server Auth
+                "name_flags": [],
+                "enrollment_flags": [],
+                "min_key_size": 2048,
+                "issuance_policy_oids": [],
+                "security": [
+                    {
+                        "trustee_sid": LOW_PRIV_SID,
+                        "trustee_name": "Domain Users",
+                        # msPKI-Certificate-Name-Flag schemaIDGUID (verified from
+                        # MS-ADSC) — a scoped write here can enable
+                        # ENROLLEE_SUPPLIES_SUBJECT -> ESC1 conversion (ESC4).
+                        "rights": ["WriteProperty:ea1dddc4-60ff-416e-8cc0-17cee534bce7"],
+                        "ace_type": "Allow",
+                    }
+                ],
+                "acl_obtained": True,
+            },
         ],
     )
 
@@ -366,7 +395,7 @@ def _write_certs(base: Path, *, now: datetime) -> None:
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import rsa
     from cryptography.hazmat.primitives.serialization import Encoding
-    from cryptography.x509.oid import NameOID
+    from cryptography.x509.oid import AuthorityInformationAccessOID, NameOID
 
     _DER = Encoding.DER
     certs_dir = base / "certs"
@@ -392,11 +421,51 @@ def _write_certs(base: Path, *, now: datetime) -> None:
         return cert, key
 
     # Root cert: healthy. Issuing cert: expiring within 30 days (should flag).
+    # The issuing cert carries AIA (OCSP + CA Issuers) and CRL Distribution
+    # Points extensions so the OCSP_URL_ABSENT and CDP_AIA_ABSENT checks stay
+    # clean on the fixture (the issuing CA is well-configured for revocation).
     root_cert, root_key = _self_signed(
         ROOT_CA, now - timedelta(days=3650), now + timedelta(days=3650)
     )
-    iss_cert, iss_key = _self_signed(
-        ISSUING_CA, now - timedelta(days=1700), now + timedelta(days=30)
+    iss_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    iss_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, ISSUING_CA)])
+    iss_cert = (
+        x509.CertificateBuilder()
+        .subject_name(iss_name)
+        .issuer_name(root_cert.subject)
+        .public_key(iss_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1700))
+        .not_valid_after(now + timedelta(days=30))
+        .add_extension(
+            x509.AuthorityInformationAccess(
+                [
+                    x509.AccessDescription(
+                        AuthorityInformationAccessOID.OCSP,
+                        x509.UniformResourceIdentifier(f"http://ocsp.{DOMAIN}/ocsp"),
+                    ),
+                    x509.AccessDescription(
+                        AuthorityInformationAccessOID.CA_ISSUERS,
+                        x509.UniformResourceIdentifier(f"http://aia.{DOMAIN}/{ROOT_CA}.cer"),
+                    ),
+                ]
+            ),
+            critical=False,
+        )
+        .add_extension(
+            x509.CRLDistributionPoints(
+                [
+                    x509.DistributionPoint(
+                        full_name=[x509.UniformResourceIdentifier(f"http://crl.{DOMAIN}/{ISSUING_CA}.crl")],
+                        relative_name=None,
+                        reasons=None,
+                        crl_issuer=None,
+                    )
+                ]
+            ),
+            critical=False,
+        )
+        .sign(root_key, hashes.SHA256())
     )
     (certs_dir / "root.cer").write_bytes(root_cert.public_bytes(_DER))
     (certs_dir / "issuing.cer").write_bytes(iss_cert.public_bytes(_DER))

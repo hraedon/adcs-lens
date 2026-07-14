@@ -4,6 +4,69 @@ All notable changes to adcs-lens are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2026-07-14
+
+### Added
+- **Property-scoped WriteProperty (WI-019)**: ESC4 now flags a low-priv
+  trustee holding a scoped `WriteProperty` on a dangerous template property
+  (msPKI-Certificate-Name-Flag, msPKI-Enrollment-Flag, pKIExtendedKeyUsage,
+  msPKI-Certificate-Policy, msPKI-Certificate-Application-Policy). The
+  collector (v0.6.2) emits `WriteProperty:<guid>` for scoped writes; the core
+  maps the GUID to the property name and flags it. Broad Deny rights
+  (GenericAll, FullControl, GenericWrite) correctly suppress scoped writes via
+  the existing `_COVERS` implication map.
+- **OCSP URL-presence check (WI-022)**: flags issuing CAs whose certificate
+  lacks an OCSP responder URL in its AIA extension (`OCSP_URL_ABSENT`, LOW).
+  The `[certs]` extra now parses AIA and CRL Distribution Points extensions.
+- **Orphaned-template detector (WI-032)**: flags templates that exist in AD
+  but are not published by any enrollment service (`ORPHANED_TEMPLATE`, LOW).
+  Degrades to no-op when no enrollment services are present.
+- **CDP/AIA URL-presence check (WI-032)**: flags issuing CAs whose certificate
+  lacks CDP or AIA URLs (`CDP_AIA_ABSENT`, MEDIUM).
+- **Narration layer (WI-016)**: optional executive-summary module
+  (`adcs_lens.narration`) with deterministic (template-based) and optional
+  AI-enhanced modes. Accessible via `doctor --narrate` (prints to stderr).
+  Imports the core, never the reverse (architecture-guarded).
+- **Findings suppression / risk-acceptance (WI-021)**: `doctor
+  --suppressions <file.json>` loads a JSON risk-acceptance file and filters
+  suppressed findings from the `--exit-code` gate. Each rule carries a reason
+  and optional expiry. Suppressed findings are excluded from output; the
+  suppression summary is printed to stderr for the audit trail.
+- **SARIF `locations` structure (WI-035)**: each SARIF result now carries a
+  `locations` array with `physicalLocation.artifactLocation` (using a `file:` URI)
+  and `logicalLocations` for the source fact and subject, per the SARIF 2.1.0 spec.
+- **HTML table of contents (WI-035)**: the HTML report now includes a TOC
+  linking to each severity band with counts.
+- **Diff SARIF/HTML output (WI-035)**: `diff --sarif` and `diff --html` flags
+  for CI/GRC integration of drift reports.
+- **ESC7 SID in SARIF (WI-035)**: ESC7 findings include a `properties.sid`
+  field in SARIF output.
+- **PyPI publishing (WI-039)**: GitHub Action workflow (`.github/workflows/
+  publish.yml`) publishes to PyPI on release. The package is installable via
+  `pip install adcs-lens[certs]`.
+
+### Fixed
+- **Collector v0.6.1**: LDAP `SecurityMasks` now requests `Dacl,Owner` (was
+  `Dacl` only), so template and PKI-object `owner_sid` fields are actually
+  populated. In v0.6.0 these were always empty — the owner-based ESC4/ESC5
+  control paths (WI-019) could never fire on real data. The CA `owner_sid`
+  (ESC7, read from the registry) was unaffected. The core degrades honestly
+  either way (empty `owner_sid` → owner control skipped), so this was a
+  coverage gap, not a false positive.
+- **Collector v0.6.2**: scoped `WriteProperty` ACEs now emit the property GUID
+  (`WriteProperty:<guid>`) instead of bare `WriteProperty`, enabling the
+  property-scoped ESC4 detector (WI-019).
+
+### Validated
+- **WI-040**: Collector v0.6.0–v0.6.2 CA `owner_sid` capture live-validated
+  on `LABCA` (`WORK-DOMAIN.local`). The CA security descriptor owner resolves to
+  `S-1-5-32-544` (BUILTIN\Administrators — high-priv), so the ESC7
+  owner-based finding correctly does *not* fire. Template and PKI-object
+  owner_sids now also resolve (all high-priv: Enterprise Admins / Domain
+  Admins) with the v0.6.1 fix. The full `doctor` run produces 35 findings
+  (2 HIGH ESC8, 6 MEDIUM ESC15, 27 LOW orphaned templates, 6 INFO coverage
+  notes) — all validated against the live estate.
+
 ## [1.0.0] — 2026-07-14
 
 First public release. Local-first, read-only AD CS / PKI posture analysis with a
@@ -52,9 +115,13 @@ deterministic, stdlib-only core (no AI in the truth path).
 - **ESC12 is out of scope.** No statically-detectable enabling configuration has
   been identified in canonical tooling or research; the number is preserved for
   catalogue continuity and tracked as `Out (unresolved)`.
-- **Collector v0.6.0 CA `owner_sid` capture is not live-validated.** It is
+- **Collector v0.6.0 CA `owner_sid` capture is not live-validated.** ~~It is
   Pester-unit-tested and correct by inspection; the ESC7 owner-based finding
-  should be treated as unconfirmed until the next live collector run.
+  should be treated as unconfirmed until the next live collector run.~~
+  **Live-validated on LABCA (2026-07-14).** The CA owner_sid resolves to
+  BUILTIN\Administrators (high-priv); ESC7 owner-based control correctly does
+  not fire. Template/PKI-object owner_sids required a collector fix (v0.6.1:
+  LDAP SecurityMasks must include `Owner`).
 - **ESC9 EKU / DC-enforcement gates deliberately omitted.** ESC9 gates on
   low-priv enrollability + no manager approval (the false-negative-safe subset);
   the client-auth-EKU and binding-enforcement questions are tracked, not silent.

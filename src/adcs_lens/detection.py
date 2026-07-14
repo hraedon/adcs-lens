@@ -110,7 +110,7 @@ _COVERS: dict[str, frozenset[str]] = {
 }
 
 # ACE rights (lower-cased) that let a principal rewrite a template object, and so
-# turn it into ESC1 (enable enrollee-supplied subject + a client-auth EKU). These
+# turn it into ESC1 (enable enrollee-supplied subjects + a client-auth EKU). These
 # are object-wide control rights. ``writepropertyall`` is a blanket WriteProperty
 # (collector tokenises an all-zero ObjectType this way): it can rewrite any
 # property, including msPKI-Certificate-Name-Flag → ENROLLEE_SUPPLIES_SUBJECT.
@@ -124,6 +124,26 @@ _DANGEROUS_TEMPLATE_CONTROL = frozenset(
         "writeowner",
         "fullcontrol",
         "writepropertyall",
+    }
+)
+
+# Property schemaIDGUIDs (verified from the MS-ADSC / MS-ADA3 specifications)
+# whose write lets a low-priv principal convert a template into an ESC1 path:
+# enable ENROLLEE_SUPPLIES_SUBJECT, change the EKU set, alter enrollment flags,
+# or link issuance policies. The collector (v0.6.2+) emits these as
+# ``writeproperty:<guid>`` tokens for scoped WriteProperty ACEs (WI-019).
+_DANGEROUS_PROPERTY_GUIDS: frozenset[str] = frozenset(
+    {
+        # msPKI-Certificate-Name-Flag — flip ENROLLEE_SUPPLIES_SUBJECT on.
+        "ea1dddc4-60ff-416e-8cc0-17cee534bce7",
+        # msPKI-Enrollment-Flag — clear manager approval / NO_SECURITY_EXTENSION.
+        "d15ef7d8-f226-46db-ae79-b34e560bd12c",
+        # pKIExtendedKeyUsage — add a client-authentication EKU.
+        "18976af6-3b9e-11d2-90cc-00c04fd91ab1",
+        # msPKI-Certificate-Policy — link to a group-linked issuance policy.
+        "38942346-cc5b-424b-a7d8-6ffd12029c5f",
+        # msPKI-Certificate-Application-Policy — the v2+ equivalent of EKU write.
+        "dbd90548-aa37-4202-9966-8c537ba5ce32",
     }
 )
 
@@ -357,6 +377,91 @@ def _low_priv_enrollers(template: CertTemplate) -> list[AceEntry]:
     return _low_priv_allow_aces(template, _ENROLL_RIGHTS)
 
 
+def _scoped_writeproperty_guids(rights: tuple[str, ...]) -> set[str]:
+    """Extract dangerous property GUIDs from scoped WriteProperty tokens.
+
+    The collector (v0.6.2+) emits ``writeproperty:<guid>`` for a WriteProperty
+    ACE whose ObjectType is a non-zero GUID. A bare ``writeproperty`` (no GUID,
+    from an older collector) yields nothing — backward-compatible exclusion of
+    unknown-scope writes (WI-019).
+    """
+    guids: set[str] = set()
+    for r in rights:
+        token = r.strip().lower()
+        if not token.startswith("writeproperty:"):
+            continue
+        guid = token[len("writeproperty:"):]
+        if guid in _DANGEROUS_PROPERTY_GUIDS:
+            guids.add(guid)
+    return guids
+
+
+def _low_priv_dangerous_writeproperty_aces(
+    security: tuple[AceEntry, ...],
+) -> list[tuple[AceEntry, set[str]]]:
+    """Allow-ACEs granting a low-priv trustee a scoped WriteProperty on a
+    dangerous template property, after Deny precedence.
+
+    Returns ``(ace, guids)`` pairs where *guids* is the set of dangerous
+    property GUIDs the ACE reaches that are not blocked by an explicit Deny
+    on the same trustee.
+    """
+    out: list[tuple[AceEntry, set[str]]] = []
+    for ace in security:
+        if ace.ace_type is not AceType.ALLOW:
+            continue
+        if not is_low_priv_trustee(ace.trustee_sid):
+            continue
+        dangerous = _scoped_writeproperty_guids(ace.rights)
+        if not dangerous:
+            continue
+        blocked = _blocked_scoped_writeproperty(security, ace.trustee_sid)
+        surviving = dangerous - blocked
+        if surviving:
+            out.append((ace, surviving))
+    return out
+
+
+def _blocked_scoped_writeproperty(
+    security: tuple[AceEntry, ...], trustee_sid: str
+) -> set[str]:
+    """Dangerous property GUIDs blocked for *trustee_sid* by explicit Deny ACEs.
+
+    A Deny of ``writeproperty:<guid>`` blocks that specific scoped write. A
+    blanket ``writepropertyall`` Deny blocks every scoped write (it covers all
+    properties). Broad rights that cover WritePropertyAll — ``genericall``,
+    ``fullcontrol``, and ``genericwrite`` — also block every scoped write, since
+    a Deny of any right covering ``writepropertyall`` suppresses scoped writes
+    under Windows access-mask semantics. That implication is delegated to
+    ``_blocked_rights`` (which expands the ``_COVERS`` map), so a GenericAll /
+    FullControl / GenericWrite Deny does not leave a stray scoped-WriteProperty
+    Allow finding (a false positive). Same-trustee Deny ACEs only — group-token
+    expansion is out of scope (mirrors ``_blocked_rights``).
+    """
+    sid = normalize_sid(trustee_sid)
+    blocked: set[str] = set()
+    # A broad Deny (GenericAll / FullControl / GenericWrite / WritePropertyAll)
+    # covers WritePropertyAll and so blocks every scoped write. ``_blocked_rights``
+    # already expands the ``_COVERS`` implications, so membership of
+    # "writepropertyall" in the blocked set catches all of them in one shot.
+    if "writepropertyall" in _blocked_rights(security, trustee_sid):
+        blocked |= _DANGEROUS_PROPERTY_GUIDS
+    for ace in security:
+        if ace.ace_type is not AceType.DENY:
+            continue
+        if normalize_sid(ace.trustee_sid) != sid:
+            continue
+        for r in ace.rights:
+            token = r.strip().lower()
+            if token == "writepropertyall":
+                blocked |= _DANGEROUS_PROPERTY_GUIDS
+            elif token.startswith("writeproperty:"):
+                guid = token[len("writeproperty:"):]
+                if guid in _DANGEROUS_PROPERTY_GUIDS:
+                    blocked.add(guid)
+    return blocked
+
+
 def _template_security_collected(estate: Estate) -> bool:
     return _TEMPLATE_SECURITY_PASS not in estate.manifest.skipped_passes
 
@@ -531,11 +636,15 @@ def detect_esc4(estate: Estate) -> list[Finding]:
     ESC1 detector emits the single ``TEMPLATE_ACL_NOT_EVALUATED`` note, so this
     returns nothing rather than duplicating it.
 
-    Scope: evaluates DACL control rights and owner-based control (WI-019).
-    Property-*scoped* WriteProperty is still not flagged — distinguishing a write
-    that reaches msPKI-Certificate-Name-Flag from a harmless one would need a
-    property-set GUID map; only blanket (all-property) WriteProperty is treated as
-    control. Owner-based control is skipped when the owner was not captured
+    Scope: evaluates DACL control rights, owner-based control (WI-019), and
+    property-*scoped* WriteProperty on dangerous template properties (WI-019).
+    A scoped WriteProperty whose ObjectType is one of the well-known dangerous
+    property GUIDs (msPKI-Certificate-Name-Flag, msPKI-Enrollment-Flag,
+    pKIExtendedKeyUsage, msPKI-Certificate-Policy,
+    msPKI-Certificate-Application-Policy) lets a low-priv principal flip the
+    template into ESC1 just as object-wide control does. Bare ``writeproperty``
+    (no GUID, from an older collector) is still excluded — the scope is unknown.
+    Owner-based control is skipped when the owner was not captured
     (``owner_sid`` empty) — a known gap, never a false positive.
     """
     if not _template_security_collected(estate):
@@ -572,6 +681,35 @@ def detect_esc4(estate: Estate) -> list[Finding]:
                         "an ESC1 path. Remove the delegated control."
                     ),
                     source=f"template '{tmpl.name}': nTSecurityDescriptor DACL",
+                )
+            )
+        # Property-scoped WriteProperty on a dangerous property (WI-019): a
+        # scoped write that reaches msPKI-Certificate-Name-Flag etc. is an ESC1
+        # conversion path just like object-wide control, surfaced separately so
+        # the remediation (narrow the scoped write) is distinct.
+        scoped = _low_priv_dangerous_writeproperty_aces(tmpl.security)
+        if scoped:
+            who = ", ".join(
+                sorted({a.trustee_name or a.trustee_sid for a, _ in scoped})
+            )
+            findings.append(
+                Finding(
+                    check="ESC4",
+                    severity=Severity.HIGH,
+                    title=(
+                        "Template has a dangerous property-scoped write "
+                        "by a low-privilege principal"
+                    ),
+                    subject=tmpl.display_name or tmpl.name,
+                    detail=(
+                        f"{who} hold a scoped WriteProperty on one or more dangerous "
+                        "template properties (msPKI-Certificate-Name-Flag, "
+                        "msPKI-Enrollment-Flag, pKIExtendedKeyUsage, "
+                        "msPKI-Certificate-Policy, or msPKI-Certificate-Application-Policy) "
+                        "and can rewrite it to create an ESC1 path. Narrow the scoped "
+                        "write to non-dangerous properties or remove it."
+                    ),
+                    source=f"template '{tmpl.name}': nTSecurityDescriptor scoped WriteProperty",
                 )
             )
         # Owner-based control (WI-019): a low-privilege owner can rewrite the
@@ -1958,6 +2096,141 @@ def detect_acl_coverage_caveats(estate: Estate) -> list[Finding]:
     ]
 
 
+def detect_orphaned_templates(estate: Estate) -> list[Finding]:
+    """Flag templates not published by any enrollment service (WI-032).
+
+    A template that exists in AD but no CA offers for enrollment is either a
+    leftover from a deprecated use case or a misconfiguration. It is not directly
+    exploitable, but it expands the attack surface (a CA operator can publish it
+    at any time) and signals hygiene drift. Statically readable from the
+    enrollment-services join already performed at ingest.
+
+    Degrades honestly: if no template in the estate carries a publisher (the
+    enrollment-services pass was not collected, or the estate has no CAs), every
+    template would look orphaned — meaningless noise. The check is skipped in
+    that case rather than flagging the whole estate.
+    """
+    if not any(tmpl.published_by for tmpl in estate.templates):
+        return []
+    findings: list[Finding] = []
+    for tmpl in estate.templates:
+        if tmpl.published_by:
+            continue
+        findings.append(
+            Finding(
+                check="ORPHANED_TEMPLATE",
+                severity=Severity.LOW,
+                title="Template is not published by any enrollment service",
+                subject=tmpl.display_name or tmpl.name,
+                detail=(
+                    f"Template '{tmpl.name}' exists in AD but no CA offers it for "
+                    "enrollment. It is not directly exploitable, but it expands the "
+                    "attack surface and signals hygiene drift. Remove the template if "
+                    "it is no longer needed, or publish it under the intended CA."
+                ),
+                source=f"template '{tmpl.name}': published_by is empty",
+            )
+        )
+    return findings
+
+
+def detect_ocsp_absence(estate: Estate) -> list[Finding]:
+    """Flag issuing CAs whose certificate lacks an OCSP URL in its AIA (WI-022).
+
+    OCSP-based revocation checking is not available for certificates issued by a
+    CA whose own certificate carries no OCSP responder URL in its Authority
+    Information Access extension. This is a posture note (many CAs use only CRL),
+    not a vulnerability — clients fall back to CRL fetching. Only issuing CAs are
+    checked: an offline root never serves end-entity certs, so its OCSP presence
+    is irrelevant. Only fires when certs were parsed (same gate as other
+    lifecycle checks).
+    """
+    if not estate.manifest.certs_parsed:
+        return []
+    findings: list[Finding] = []
+    for ca in estate.cas:
+        if ca.kind is CaKind.ROOT:
+            continue
+        for cert in ca.certs:
+            if cert.ocsp_urls:
+                continue
+            findings.append(
+                Finding(
+                    check="OCSP_URL_ABSENT",
+                    severity=Severity.LOW,
+                    title="Issuing CA certificate has no OCSP responder URL",
+                    subject=ca.name,
+                    detail=(
+                        f"The certificate for {ca.name} ({cert.subject}) carries no OCSP "
+                        "responder URL in its Authority Information Access extension, so "
+                        "OCSP-based revocation checking is not available for certificates "
+                        "issued by this CA. Clients fall back to CRL fetching. This is a "
+                        "posture note, not a vulnerability — add an OCSP URL if the CA "
+                        "should support OCSP-based revocation."
+                    ),
+                    source=f"CA cert for {ca.name}: {cert.subject} AIA extension (no OCSP)",
+                    tier=CrlTier.ISSUING,
+                )
+            )
+    return findings
+
+
+def detect_cdp_aia_absence(estate: Estate) -> list[Finding]:
+    """Flag issuing CAs whose certificate has no CDP or AIA URL (WI-032).
+
+    A CA certificate without a CRL Distribution Point extension gives clients no
+    revocation path at all, and without an AIA extension clients cannot build the
+    chain to the issuer. Both are real posture problems (not just hygiene):
+    clients that cannot fetch a CRL will reject the chain or silently skip
+    revocation checking. Only issuing CAs are checked (an offline root's
+    self-signed cert is its own chain root). Only fires when certs were parsed.
+    """
+    if not estate.manifest.certs_parsed:
+        return []
+    findings: list[Finding] = []
+    for ca in estate.cas:
+        if ca.kind is CaKind.ROOT:
+            continue
+        for cert in ca.certs:
+            missing: list[str] = []
+            cdp_missing = not cert.cdp_urls
+            aia_missing = not cert.aia_urls
+            if cdp_missing:
+                missing.append("CRL Distribution Points")
+            if aia_missing:
+                missing.append("Authority Information Access (CA Issuers)")
+            if not missing:
+                continue
+            missing_text = " and ".join(missing)
+            if cdp_missing and aia_missing:
+                consequence = (
+                    "so clients cannot fetch revocation data or build the "
+                    "certificate chain"
+                )
+            elif cdp_missing:
+                consequence = "so clients cannot fetch revocation data (CRL)"
+            else:  # aia_missing
+                consequence = (
+                    "so clients cannot build the certificate chain (CA issuer info)"
+                )
+            findings.append(
+                Finding(
+                    check="CDP_AIA_ABSENT",
+                    severity=Severity.MEDIUM,
+                    title=f"Issuing CA certificate lacks {missing_text}",
+                    subject=ca.name,
+                    detail=(
+                        f"The certificate for {ca.name} ({cert.subject}) has no "
+                        f"{missing_text} extension URL(s), {consequence}. Publish CDP and "
+                        "AIA URLs on the CA certificate and reissue if necessary."
+                    ),
+                    source=f"CA cert for {ca.name}: {cert.subject} missing {missing_text}",
+                    tier=CrlTier.ISSUING,
+                )
+            )
+    return findings
+
+
 def run_all(
     estate: Estate,
     *,
@@ -1986,6 +2259,9 @@ def run_all(
         *detect_weak_signing(estate),
         *detect_weak_key_size(estate),
         *detect_audit_config(estate),
+        *detect_orphaned_templates(estate),
+        *detect_ocsp_absence(estate),
+        *detect_cdp_aia_absence(estate),
         *detect_acl_coverage_caveats(estate),
     ]
     findings.sort(key=lambda f: (SEVERITY_RANK[f.severity], f.check, f.subject))

@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from collections import Counter
 from dataclasses import asdict
+from urllib.parse import quote
 
 from adcs_lens import __version__
 from adcs_lens.consequences import consequence_for
@@ -26,6 +28,20 @@ _SARIF_LEVEL: dict[Severity, str] = {
     Severity.LOW: "note",
     Severity.INFO: "none",
 }
+
+
+def _artifact_uri(source: str) -> str:
+    """Encode a source fact as a file: artifactLocation URI for SARIF consumers."""
+    return f"file:///adcs-lens/{quote(source, safe='')}"
+
+
+_SID_RE = re.compile(r"(S-1(?:-\d+)+)")
+
+
+def _extract_sid(detail: str) -> str | None:
+    """Best-effort SID extraction for ESC7 properties bag."""
+    match = _SID_RE.search(detail)
+    return match.group(1) if match else None
 
 
 def summarize(findings: list[Finding]) -> dict[str, int]:
@@ -49,14 +65,20 @@ def _finding_with_consequence(f: Finding) -> dict[str, object]:
     return data
 
 
-def render_json(findings: list[Finding]) -> str:
+def render_json(
+    findings: list[Finding],
+    *,
+    suppressions: dict[str, object] | None = None,
+) -> str:
     """Serialize findings + summary as a stable JSON envelope."""
-    envelope = {
+    envelope: dict[str, object] = {
         "schema_version": SCHEMA_VERSION,
         "kind": "doctor",
         "summary": summarize(findings),
         "findings": [_finding_with_consequence(f) for f in findings],
     }
+    if suppressions is not None:
+        envelope["suppressions"] = suppressions
     return json.dumps(envelope, indent=2, sort_keys=True)
 
 
@@ -146,6 +168,206 @@ def render_diff_text(report: DriftReport) -> str:
     return "\n".join(lines)
 
 
+def _diff_sarif_result(
+    f: Finding, level: str, rule_index: dict[str, int], baseline_state: str
+) -> dict[str, object]:
+    """Build one SARIF result for a drift finding."""
+    tier_suffix = f" ({f.tier.value}-tier)" if f.tier is not None else ""
+    result: dict[str, object] = {
+        "ruleId": f.check,
+        "ruleIndex": rule_index[f.check],
+        "level": level,
+        "message": {"text": f"{f.title}: {f.detail}{tier_suffix}"},
+        "baselineState": baseline_state,
+        "locations": [
+            {
+                "physicalLocation": {
+                    "artifactLocation": {"uri": _artifact_uri(f.source)}
+                },
+                "logicalLocations": [
+                    {"fullyQualifiedName": f.source, "name": f.subject},
+                ],
+            }
+        ],
+    }
+    if f.check == "ESC7":
+        sid = _extract_sid(f.detail)
+        if sid:
+            result["properties"] = {"sid": sid}
+    return result
+
+
+def render_diff_sarif(report: DriftReport) -> str:
+    """Render a drift report as a SARIF v2.1.0 log.
+
+    Each result uses the SARIF level mapped from the finding's own severity.
+    New, worsened, content-changed, and resolved findings all preserve their
+    source severity rather than being hard-coded to a single level. The
+    finding's check id is used as the SARIF ``ruleId``. A ``baselineState``
+    distinguishes new, updated, and resolved drift items for CI consumers.
+    """
+    findings = list(report.new) + [d.new for d in report.changed] + list(report.resolved)
+    check_ids = sorted({f.check for f in findings})
+    rule_index: dict[str, int] = {check: i for i, check in enumerate(check_ids)}
+
+    rules: list[dict[str, object]] = []
+    for check in check_ids:
+        entry = consequence_for(check)
+        if entry is not None:
+            rules.append(
+                {
+                    "id": check,
+                    "name": check,
+                    "shortDescription": {"text": entry.summary},
+                    "fullDescription": {"text": entry.consequence},
+                    "help": {"text": entry.remediation},
+                }
+            )
+        else:
+            rules.append({"id": check, "name": check, "shortDescription": {"text": check}})
+
+    results: list[dict[str, object]] = []
+    for f in report.new:
+        results.append(_diff_sarif_result(f, _SARIF_LEVEL[f.severity], rule_index, "new"))
+    for d in report.changed:
+        results.append(
+            _diff_sarif_result(d.new, _SARIF_LEVEL[d.new.severity], rule_index, "updated")
+        )
+    for f in report.resolved:
+        results.append(_diff_sarif_result(f, _SARIF_LEVEL[f.severity], rule_index, "absent"))
+
+    sarif = {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "adcs-lens",
+                        "version": __version__,
+                        "informationUri": "https://github.com/hraedon/adcs-lens",
+                        "rules": rules,
+                    }
+                },
+                "results": results,
+            }
+        ],
+    }
+    return json.dumps(sarif, indent=2, sort_keys=True)
+
+
+def _diff_html_finding(f: Finding, badge_class: str | None = None) -> list[str]:
+    """Render one finding in a diff HTML report."""
+    out = [
+        '<article class="finding">',
+        '<div class="finding-head">',
+        f'<span class="sev {_html_severity_class(f.severity)}">'
+        f"{html.escape(f.severity.value.upper())}</span>",
+        f'<span class="check">{html.escape(f.check)}</span>',
+        f'<span class="subject">{html.escape(f.subject)}</span>',
+        "</div>",
+        f'<p class="title">{html.escape(f.title)}</p>',
+        f'<p class="detail">{html.escape(f.detail)}</p>',
+        f'<p class="source">source: {html.escape(f.source)}</p>',
+    ]
+    if badge_class:
+        label = badge_class.replace("-", " ").title()
+        out.insert(3, f'<span class="diff-badge {badge_class}">{label}</span>')
+    entry = consequence_for(f.check)
+    if entry is not None:
+        out.append('<div class="consequence">')
+        out.append(f"<p><strong>In plain terms.</strong> {html.escape(entry.summary)}</p>")
+        out.append(f"<p><strong>Risk.</strong> {html.escape(entry.consequence)}</p>")
+        out.append(f"<p><strong>How to fix.</strong> {html.escape(entry.remediation)}</p>")
+        out.append("</div>")
+    out.append("</article>")
+    return out
+
+
+def render_diff_html(report: DriftReport) -> str:
+    """Render a self-contained HTML drift report."""
+    new = list(report.new)
+    resolved = list(report.resolved)
+    changed = list(report.changed)
+    unchanged = report.unchanged
+
+    parts: list[str] = [
+        "<!DOCTYPE html>",
+        '<html lang="en">',
+        "<head>",
+        '<meta charset="utf-8">',
+        '<meta name="viewport" content="width=device-width, initial-scale=1">',
+        "<title>AD CS Drift Report — adcs-lens</title>",
+        "<style>",
+        _HTML_STYLE,
+        _DIFF_HTML_STYLE,
+        "</style>",
+        "</head>",
+        "<body>",
+        "<header>",
+        "<h1>AD CS Drift Report</h1>",
+        f'<p class="tool">Generated by adcs-lens {html.escape(__version__)} — '
+        "read-only drift between two exported AD CS / PKI snapshots.</p>",
+        '<div class="summary">',
+        f'<span class="diff-summary">+{len(new)} new</span>',
+        f'<span class="diff-summary">-{len(resolved)} resolved</span>',
+        f'<span class="diff-summary">~{len(changed)} changed</span>',
+        f'<span class="diff-summary">={unchanged} unchanged</span>',
+        "</div>",
+        "</header>",
+    ]
+
+    if not (new or changed or resolved):
+        parts.append('<p class="empty">No drift — posture is unchanged.</p>')
+    else:
+        parts.append("<main>")
+        if new:
+            parts.append('<section class="diff-section" id="new-findings">')
+            parts.append(f'<h2>New findings <span class="count">({len(new)})</span></h2>')
+            for f in new:
+                parts.extend(_diff_html_finding(f, badge_class="new"))
+            parts.append("</section>")
+        if changed:
+            parts.append('<section class="diff-section" id="changed-findings">')
+            parts.append(f'<h2>Changed findings <span class="count">({len(changed)})</span></h2>')
+            for d in changed:
+                if d.worsened:
+                    badge = "worsened"
+                elif d.old.severity != d.new.severity:
+                    badge = "improved"
+                else:
+                    badge = "changed"
+                parts.append('<article class="finding changed">')
+                parts.append('<div class="finding-head">')
+                parts.append(
+                    f'<span class="sev {_html_severity_class(d.new.severity)}">'
+                    f"{html.escape(d.new.severity.value.upper())}</span>"
+                )
+                parts.append(f'<span class="check">{html.escape(d.new.check)}</span>')
+                parts.append(f'<span class="subject">{html.escape(d.new.subject)}</span>')
+                parts.append(f'<span class="diff-badge {badge}">{badge.title()}</span>')
+                parts.append("</div>")
+                parts.append(f'<p class="title">{html.escape(d.new.title)}</p>')
+                parts.append(f'<p class="source">source: {html.escape(d.new.source)}</p>')
+                parts.append(
+                    f'<p class="detail">{html.escape(d.old.severity.value)} &rarr; '
+                    f"{html.escape(d.new.severity.value)}</p>"
+                )
+                parts.append("</article>")
+            parts.append("</section>")
+        if resolved:
+            parts.append('<section class="diff-section" id="resolved-findings">')
+            parts.append(f'<h2>Resolved findings <span class="count">({len(resolved)})</span></h2>')
+            for f in resolved:
+                parts.extend(_diff_html_finding(f, badge_class="resolved"))
+            parts.append("</section>")
+        parts.append("</main>")
+
+    parts.append("</body>")
+    parts.append("</html>")
+    return "\n".join(parts)
+
+
 def render_sarif(findings: list[Finding]) -> str:
     """Render findings as a SARIF v2.1.0 log for CI / GRC integration.
 
@@ -153,8 +375,8 @@ def render_sarif(findings: list[Finding]) -> str:
     DevOps) and GRC tools consume natively. Rules are de-duplicated by check id
     and sorted so ``ruleIndex`` references are deterministic; results preserve
     the input (worst-first) order. AD CS objects are not files, so the source
-    fact is placed in ``logicalLocations`` rather than ``artifactLocation.uri``,
-    which would require a valid URI.
+    fact is placed in ``logicalLocations`` and surfaced as a ``file:`` scheme
+    ``artifactLocation`` for GRC consumers.
     """
     check_ids = sorted({f.check for f in findings})
     index_by_check: dict[str, int] = {check: i for i, check in enumerate(check_ids)}
@@ -184,20 +406,30 @@ def render_sarif(findings: list[Finding]) -> str:
     results: list[dict[str, object]] = []
     for f in findings:
         tier_suffix = f" ({f.tier.value}-tier)" if f.tier is not None else ""
-        results.append(
-            {
-                "ruleId": f.check,
-                "ruleIndex": index_by_check[f.check],
-                "level": _SARIF_LEVEL[f.severity],
-                "message": {"text": f"{f.title}: {f.detail}{tier_suffix}"},
-                "logicalLocations": [
-                    {
-                        "fullyQualifiedName": f.source,
-                        "name": f.subject,
+        result: dict[str, object] = {
+            "ruleId": f.check,
+            "ruleIndex": index_by_check[f.check],
+            "level": _SARIF_LEVEL[f.severity],
+            "message": {"text": f"{f.title}: {f.detail}{tier_suffix}"},
+            "locations": [
+                {
+                    "physicalLocation": {
+                        "artifactLocation": {"uri": _artifact_uri(f.source)}
                     },
-                ],
-            }
-        )
+                    "logicalLocations": [
+                        {
+                            "fullyQualifiedName": f.source,
+                            "name": f.subject,
+                        },
+                    ],
+                }
+            ],
+        }
+        if f.check == "ESC7":
+            sid = _extract_sid(f.detail)
+            if sid:
+                result["properties"] = {"sid": sid}
+        results.append(result)
 
     sarif = {
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
@@ -271,20 +503,34 @@ def render_html(findings: list[Finding]) -> str:
     parts.append("</div>")  # summary
     parts.append("</header>")
 
-    if not findings:
-        parts.append('<p class="empty">No findings — nothing to act on.</p>')
-    else:
-        # Group findings into severity bands, worst first, preserving input order
-        # within each band (run_all already sorts worst-first then check/subject).
+    if findings:
+        # Table of contents: jump to each severity band that has findings.
+        parts.append('<nav class="toc" aria-label="Table of contents">')
+        parts.append("<h2>Contents</h2>")
+        parts.append("<ul>")
         by_severity: dict[Severity, list[Finding]] = {sev: [] for sev in Severity}
         for f in findings:
             by_severity[f.severity].append(f)
+        for sev in _HTML_SEVERITY_ORDER:
+            band = by_severity[sev]
+            if not band:
+                continue
+            parts.append(
+                f'<li><a href="#{sev.value}">'
+                f"{html.escape(sev.value.title())} "
+                f'<span class="count">({len(band)})</span></a></li>'
+            )
+        parts.append("</ul>")
+        parts.append("</nav>")
+
         parts.append("<main>")
         for sev in _HTML_SEVERITY_ORDER:
             band = by_severity[sev]
             if not band:
                 continue
-            parts.append(f'<section class="band {_html_severity_class(sev)}">')
+            parts.append(
+                f'<section class="band {_html_severity_class(sev)}" id="{sev.value}">'
+            )
             parts.append(
                 f"<h2>{html.escape(sev.value.title())} "
                 f'<span class="count">({len(band)})</span></h2>'
@@ -293,6 +539,8 @@ def render_html(findings: list[Finding]) -> str:
                 parts.extend(_html_finding(f))
             parts.append("</section>")
         parts.append("</main>")
+    else:
+        parts.append('<p class="empty">No findings — nothing to act on.</p>')
 
     parts.append("</body>")
     parts.append("</html>")
@@ -383,4 +631,38 @@ h2 {
 .consequence p { margin: .2rem 0; }
 .empty { font-size: 1.1rem; color: #555; }
 .count { font-weight: 400; color: #666; }
+.toc {
+  background: #f6f8fa; border: 1px solid #e3e3e3; border-radius: .35rem;
+  padding: .75rem 1rem; margin-bottom: 1.25rem;
+}
+.toc h2 { font-size: 1rem; margin: 0 0 .4rem; padding: 0; border: none; }
+.toc ul {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-wrap: wrap; gap: .4rem;
+}
+.toc li { margin: 0; }
+.toc a {
+  display: inline-block; text-decoration: none; padding: .15rem .5rem;
+  border-radius: .25rem; background: #fff; border: 1px solid #d8d8d8;
+  color: #1a1a1a;
+}
+.toc a:hover { background: #eef; }
+"""
+
+_DIFF_HTML_STYLE = """
+.diff-summary {
+  display: inline-block; padding: .15rem .5rem; border-radius: .25rem;
+  font-size: .85rem; font-weight: 600; background: #e9ecef; color: #1a1a1a;
+}
+.diff-badge {
+  display: inline-block; padding: .1rem .4rem; border-radius: .25rem;
+  font-size: .75rem; font-weight: 600; color: #fff;
+}
+.diff-badge.new { background: #b3261e; }
+.diff-badge.resolved { background: #198754; }
+.diff-badge.worsened { background: #b3261e; }
+.diff-badge.improved { background: #198754; }
+.diff-badge.changed { background: #e0a800; color: #1a1a1a; }
+.diff-section { margin-bottom: 1.25rem; }
+.changed { border-left: 4px solid #e0a800; }
 """

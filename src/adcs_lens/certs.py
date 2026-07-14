@@ -14,6 +14,7 @@ from __future__ import annotations
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import dsa, ec, rsa
+from cryptography.x509.oid import AuthorityInformationAccessOID, ExtensionOID
 
 from adcs_lens.model import CertKind, CertLifecycle, Crl, CrlTier
 
@@ -44,9 +45,64 @@ def _key_alg(cert: x509.Certificate) -> str:
     return "unknown"
 
 
+def _uri_from_access_location(location: x509.GeneralName) -> str | None:
+    """Extract a URI string from an AIA/CRL access location GeneralName."""
+    if isinstance(location, x509.UniformResourceIdentifier):
+        return location.value
+    return None
+
+
+def _aia_urls(cert: x509.Certificate) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return ``(ocsp_urls, aia_ca_urls)`` parsed from the AIA extension.
+
+    OCSP URLs come from AccessDescription entries whose access_method is
+    ``ad_ocsp``; CA Issuer URLs from ``ad_ca_issuers`` entries. Both are
+    ``uniformResourceIdentifier`` GeneralNames.
+    """
+    ocsp: list[str] = []
+    ca_issuers: list[str] = []
+    try:
+        ext = cert.extensions.get_extension_for_oid(ExtensionOID.AUTHORITY_INFORMATION_ACCESS)
+    except x509.ExtensionNotFound:
+        return (), ()
+    aia = ext.value
+    if not isinstance(aia, x509.AuthorityInformationAccess):
+        return (), ()
+    for desc in aia:
+        if desc.access_method == AuthorityInformationAccessOID.OCSP:
+            uri = _uri_from_access_location(desc.access_location)
+            if uri:
+                ocsp.append(uri)
+        elif desc.access_method == AuthorityInformationAccessOID.CA_ISSUERS:
+            uri = _uri_from_access_location(desc.access_location)
+            if uri:
+                ca_issuers.append(uri)
+    return tuple(ocsp), tuple(ca_issuers)
+
+
+def _cdp_urls(cert: x509.Certificate) -> tuple[str, ...]:
+    """Return CRL Distribution Point URLs parsed from the CRL DP extension."""
+    urls: list[str] = []
+    try:
+        ext = cert.extensions.get_extension_for_oid(ExtensionOID.CRL_DISTRIBUTION_POINTS)
+    except x509.ExtensionNotFound:
+        return ()
+    cdp = ext.value
+    if not isinstance(cdp, x509.CRLDistributionPoints):
+        return ()
+    for dp in cdp:
+        if dp.full_name is None:
+            continue
+        for name in dp.full_name:
+            if isinstance(name, x509.UniformResourceIdentifier):
+                urls.append(name.value)
+    return tuple(urls)
+
+
 def parse_cert(der: bytes, *, kind: CertKind) -> CertLifecycle:
     """Parse a DER certificate into :class:`CertLifecycle`."""
     cert = x509.load_der_x509_certificate(der)
+    ocsp_urls, aia_urls = _aia_urls(cert)
     return CertLifecycle(
         subject=cert.subject.rfc4514_string(),
         kind=kind,
@@ -55,6 +111,9 @@ def parse_cert(der: bytes, *, kind: CertKind) -> CertLifecycle:
         sig_alg=_sig_alg(cert),
         key_bits=_key_bits(cert),
         key_alg=_key_alg(cert),
+        ocsp_urls=ocsp_urls,
+        cdp_urls=_cdp_urls(cert),
+        aia_urls=aia_urls,
     )
 
 

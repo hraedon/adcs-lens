@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from adcs_lens.detection import (
     _AUDIT_CATEGORIES,
     detect_acl_coverage_caveats,
     detect_audit_config,
+    detect_cdp_aia_absence,
     detect_esc1,
     detect_esc2,
     detect_esc3,
@@ -21,6 +24,8 @@ from adcs_lens.detection import (
     detect_esc13,
     detect_esc16,
     detect_infra_cert_expiry,
+    detect_ocsp_absence,
+    detect_orphaned_templates,
     detect_template_acl_gaps,
     detect_weak_key_size,
     detect_weak_signing,
@@ -84,6 +89,7 @@ def _template(
     min_key_size: int = 2048,
     csp: str = "",
     owner_sid: str = "",
+    published_by: tuple[str, ...] = (),
 ) -> CertTemplate:
     return CertTemplate(
         name=name,
@@ -96,7 +102,7 @@ def _template(
         min_key_size=min_key_size,
         issuance_policy_oids=issuance_policy_oids,
         security=security,
-        published_by=(),
+        published_by=published_by,
         acl_obtained=acl_obtained,
         csp=csp,
         owner_sid=owner_sid,
@@ -141,6 +147,9 @@ def _cert(
     sig_alg: str = "sha256",
     key_bits: int | None = 2048,
     key_alg: str = "rsa",
+    ocsp_urls: tuple[str, ...] = ("http://ocsp/ocsp",),
+    cdp_urls: tuple[str, ...] = ("http://crl/crl.crl",),
+    aia_urls: tuple[str, ...] = ("http://aia/ca.cer",),
 ) -> CertLifecycle:
     return CertLifecycle(
         subject=subject,
@@ -150,6 +159,9 @@ def _cert(
         sig_alg=sig_alg,
         key_bits=key_bits,
         key_alg=key_alg,
+        ocsp_urls=ocsp_urls,
+        cdp_urls=cdp_urls,
+        aia_urls=aia_urls,
     )
 
 
@@ -417,8 +429,10 @@ def test_esc4_blanket_writeproperty_flagged() -> None:
 
 
 def test_esc4_scoped_writeproperty_not_flagged() -> None:
-    # Property-scoped WriteProperty (token 'WriteProperty') may not reach the name
-    # flags; we do not flag it without a property-set GUID map.
+    # A bare 'WriteProperty' (no GUID, from an older collector v0.6.1) is still
+    # not flagged — the scope is unknown. The collector v0.6.2+ emits
+    # 'WriteProperty:<guid>' for scoped writes, which ARE flagged when the GUID
+    # is in the dangerous-property set (see test_esc4_scoped_writeproperty_*).
     tmpl = _template("ScopedWrite", security=(_enroll_ace(right="WriteProperty"),))
     assert detect_esc4(_estate(templates=(tmpl,))) == []
 
@@ -1570,15 +1584,15 @@ def test_run_all_includes_esc15() -> None:
 
 
 def test_run_all_sorted_worst_first() -> None:
-    cert = CertLifecycle(
-        "CN=Soon", CertKind.ISSUING_CA, NOW, NOW + timedelta(days=30), "sha256", 2048, "rsa"
-    )
+    from adcs_lens.model import SEVERITY_RANK
+
+    cert = _cert("CN=Soon", not_after=NOW + timedelta(days=30))
     estate = _estate(
         cas=(_ca("BadCA", edit_flags=("EDITF_ATTRIBUTESUBJECTALTNAME2",), certs=(cert,)),),
     )
     findings = run_all(estate, now=NOW)
     severities = [f.severity for f in findings]
-    assert severities == sorted(severities)
+    assert severities == sorted(severities, key=SEVERITY_RANK.__getitem__)
     assert findings[0].severity == Severity.CRITICAL
 
 
@@ -2299,3 +2313,317 @@ def test_esc4_rendering_hides_only_blocked_right() -> None:
     assert len(findings) == 1
     assert "WriteOwner" in findings[0].detail
     assert "WriteDacl" not in findings[0].detail
+
+
+# --- ESC4: property-scoped WriteProperty on dangerous GUIDs (WI-019) ---------
+
+# Verified schemaIDGUID values from MS-ADSC / MS-ADA3 specifications.
+_NAME_FLAG_GUID = "ea1dddc4-60ff-416e-8cc0-17cee534bce7"
+_ENROLL_FLAG_GUID = "d15ef7d8-f226-46db-ae79-b34e560bd12c"
+_EKU_GUID = "18976af6-3b9e-11d2-90cc-00c04fd91ab1"
+
+
+def test_esc4_scoped_writeproperty_on_dangerous_guid_flagged() -> None:
+    # A scoped WriteProperty on msPKI-Certificate-Name-Flag lets a low-priv
+    # principal flip ENROLLEE_SUPPLIES_SUBJECT on -> an ESC4 path (WI-019).
+    ace = AceEntry(
+        trustee_sid=LOW_PRIV_SID,
+        trustee_name="Domain Users",
+        rights=(f"WriteProperty:{_NAME_FLAG_GUID}",),
+        ace_type=AceType.ALLOW,
+    )
+    tmpl = _template("ScopedWrite", security=(ace,))
+    findings = detect_esc4(_estate(templates=(tmpl,)))
+    esc4 = [f for f in findings if f.check == "ESC4"]
+    assert len(esc4) == 1
+    assert "scoped" in esc4[0].title.lower()
+    assert "dangerous" in esc4[0].detail.lower()
+
+
+def test_esc4_scoped_writeproperty_on_eku_guid_flagged() -> None:
+    # A scoped WriteProperty on pKIExtendedKeyUsage lets a low-priv principal
+    # add a client-auth EKU -> an ESC4 path.
+    ace = AceEntry(
+        trustee_sid=LOW_PRIV_SID,
+        trustee_name="Domain Users",
+        rights=(f"WriteProperty:{_EKU_GUID}",),
+        ace_type=AceType.ALLOW,
+    )
+    tmpl = _template("ScopedEku", security=(ace,))
+    findings = detect_esc4(_estate(templates=(tmpl,)))
+    assert any(f.check == "ESC4" and "scoped" in f.title.lower() for f in findings)
+
+
+def test_esc4_scoped_writeproperty_on_benign_guid_not_flagged() -> None:
+    # A scoped WriteProperty on a non-dangerous property (e.g. displayName) is
+    # not an ESC4 path — the GUID is not in the dangerous set.
+    ace = AceEntry(
+        trustee_sid=LOW_PRIV_SID,
+        trustee_name="Domain Users",
+        rights=("WriteProperty:00000000-0000-0000-0000-deadbeef0001",),
+        ace_type=AceType.ALLOW,
+    )
+    tmpl = _template("BenignScoped", security=(ace,))
+    assert detect_esc4(_estate(templates=(tmpl,))) == []
+
+
+def test_esc4_bare_writeproperty_still_not_flagged() -> None:
+    # A bare 'WriteProperty' (no GUID, from an older collector) is still
+    # excluded — the scope is unknown (backward compat with v0.6.1).
+    tmpl = _template("BareWrite", security=(_enroll_ace(right="WriteProperty"),))
+    assert detect_esc4(_estate(templates=(tmpl,))) == []
+
+
+def test_esc4_scoped_writeproperty_high_priv_not_flagged() -> None:
+    ace = AceEntry(
+        trustee_sid=HIGH_PRIV_SID,
+        trustee_name="Domain Admins",
+        rights=(f"WriteProperty:{_NAME_FLAG_GUID}",),
+        ace_type=AceType.ALLOW,
+    )
+    tmpl = _template("AdminScoped", security=(ace,))
+    assert detect_esc4(_estate(templates=(tmpl,))) == []
+
+
+def test_esc4_scoped_writeproperty_suppressed_by_deny() -> None:
+    # A Deny of the same scoped WriteProperty blocks the Allow (Deny precedence).
+    allow = AceEntry(
+        trustee_sid=LOW_PRIV_SID,
+        trustee_name="Domain Users",
+        rights=(f"WriteProperty:{_NAME_FLAG_GUID}",),
+        ace_type=AceType.ALLOW,
+    )
+    deny = AceEntry(
+        trustee_sid=LOW_PRIV_SID,
+        trustee_name="Domain Users",
+        rights=(f"WriteProperty:{_NAME_FLAG_GUID}",),
+        ace_type=AceType.DENY,
+    )
+    tmpl = _template("DeniedScoped", security=(allow, deny))
+    esc4 = [f for f in detect_esc4(_estate(templates=(tmpl,))) if f.check == "ESC4"]
+    assert esc4 == []
+
+
+def test_esc4_scoped_writeproperty_suppressed_by_writepropertyall_deny() -> None:
+    # A blanket WritePropertyAll Deny blocks every scoped write (it covers all
+    # properties), including dangerous ones.
+    allow = AceEntry(
+        trustee_sid=LOW_PRIV_SID,
+        trustee_name="Domain Users",
+        rights=(f"WriteProperty:{_NAME_FLAG_GUID}",),
+        ace_type=AceType.ALLOW,
+    )
+    deny = _ctrl_ace(right="WritePropertyAll", ace_type=AceType.DENY)
+    tmpl = _template("BlanketDenied", security=(allow, deny))
+    esc4 = [f for f in detect_esc4(_estate(templates=(tmpl,))) if f.check == "ESC4"]
+    assert esc4 == []
+
+
+@pytest.mark.parametrize("broad_right", ["GenericAll", "FullControl", "GenericWrite"])
+def test_esc4_scoped_writeproperty_suppressed_by_broad_deny(
+    broad_right: str,
+) -> None:
+    # A broad Deny (GenericAll / FullControl / GenericWrite) covers
+    # WritePropertyAll per the _COVERS map, so it must suppress a scoped
+    # WriteProperty Allow on a dangerous property — otherwise the scoped Allow
+    # would fire as a false positive (the trustee is denied all writes).
+    allow = AceEntry(
+        trustee_sid=LOW_PRIV_SID,
+        trustee_name="Domain Users",
+        rights=(f"WriteProperty:{_NAME_FLAG_GUID}",),
+        ace_type=AceType.ALLOW,
+    )
+    deny = _ctrl_ace(right=broad_right, ace_type=AceType.DENY)
+    tmpl = _template("BroadDenied", security=(allow, deny))
+    esc4 = [f for f in detect_esc4(_estate(templates=(tmpl,))) if f.check == "ESC4"]
+    assert esc4 == []
+
+
+def test_esc4_scoped_writeproperty_and_object_control_emit_two_findings() -> None:
+    # Both an object-wide WriteDacl and a scoped WriteProperty on a dangerous
+    # property -> two distinct ESC4 findings (distinct vectors/remediations).
+    allow_ctrl = _enroll_ace(right="WriteDacl")
+    allow_scoped = AceEntry(
+        trustee_sid=LOW_PRIV_SID,
+        trustee_name="Domain Users",
+        rights=(f"WriteProperty:{_ENROLL_FLAG_GUID}",),
+        ace_type=AceType.ALLOW,
+    )
+    tmpl = _template("Both", security=(allow_ctrl, allow_scoped))
+    esc4 = [f for f in detect_esc4(_estate(templates=(tmpl,))) if f.check == "ESC4"]
+    assert len(esc4) == 2
+    titles = {f.title for f in esc4}
+    assert any("writable" in t.lower() for t in titles)
+    assert any("scoped" in t.lower() for t in titles)
+
+
+def test_esc4_scoped_writeproperty_skips_unreadable_template() -> None:
+    # An unreadable-DACL template is skipped (the gap detector owns the note).
+    ace = AceEntry(
+        trustee_sid=LOW_PRIV_SID,
+        trustee_name="Domain Users",
+        rights=(f"WriteProperty:{_NAME_FLAG_GUID}",),
+        ace_type=AceType.ALLOW,
+    )
+    tmpl = _template("UnreadableScoped", security=(ace,), acl_obtained=False)
+    assert detect_esc4(_estate(templates=(tmpl,))) == []
+
+
+def test_esc4_scoped_writeproperty_wired_into_run_all() -> None:
+    ace = AceEntry(
+        trustee_sid=LOW_PRIV_SID,
+        trustee_name="Domain Users",
+        rights=(f"WriteProperty:{_NAME_FLAG_GUID}",),
+        ace_type=AceType.ALLOW,
+    )
+    tmpl = _template("ScopedRunAll", security=(ace,))
+    checks = {f.check for f in run_all(_estate(templates=(tmpl,)))}
+    assert "ESC4" in checks
+
+
+# --- Orphaned templates (WI-032) ---------------------------------------------
+
+
+def test_orphaned_template_flagged_when_not_published() -> None:
+    # An estate with at least one published template (so the enrollment-services
+    # pass ran) flags the orphan alongside it.
+    published = _template("Published", published_by=("LAB Issuing CA",))
+    orphan = _template("Orphaned", security=())
+    findings = detect_orphaned_templates(_estate(templates=(published, orphan)))
+    assert len(findings) == 1
+    assert findings[0].check == "ORPHANED_TEMPLATE"
+    assert findings[0].severity == Severity.LOW
+    assert findings[0].subject == "Orphaned"
+
+
+def test_orphaned_template_not_flagged_when_published() -> None:
+    tmpl = CertTemplate(
+        name="Published",
+        display_name="Published",
+        schema_version=2,
+        oid="1.3.6.1.4.1.311.21.8.pub",
+        ekus=(CLIENT_AUTH,),
+        name_flags=frozenset(),
+        enrollment_flags=frozenset(),
+        min_key_size=2048,
+        issuance_policy_oids=(),
+        security=(),
+        published_by=("LAB Issuing CA",),
+    )
+    assert detect_orphaned_templates(_estate(templates=(tmpl,))) == []
+
+
+def test_orphaned_template_skipped_when_no_publisher_in_estate() -> None:
+    # Degradation: when no template carries a publisher (the enrollment-services
+    # pass wasn't collected, or the estate has no CAs), every template would
+    # look orphaned — meaningless noise. The check is skipped (WI-032 review fix).
+    orphan = _template("Orphaned", security=())
+    assert detect_orphaned_templates(_estate(templates=(orphan,))) == []
+
+
+def test_orphaned_template_wired_into_run_all() -> None:
+    published = _template("Published", published_by=("LAB Issuing CA",))
+    orphan = _template("Orphan", security=())
+    checks = {f.check for f in run_all(_estate(templates=(published, orphan)))}
+    assert "ORPHANED_TEMPLATE" in checks
+
+
+# --- OCSP URL absence (WI-022) -----------------------------------------------
+
+
+def test_ocsp_absent_flagged_when_no_ocsp_url() -> None:
+    cert = _cert("CN=NoOCSP", ocsp_urls=())
+    ca = _ca("IssuingCA", certs=(cert,))
+    findings = detect_ocsp_absence(_estate(cas=(ca,)))
+    assert len(findings) == 1
+    assert findings[0].check == "OCSP_URL_ABSENT"
+    assert findings[0].severity == Severity.LOW
+    assert findings[0].subject == "IssuingCA"
+    assert findings[0].tier == CrlTier.ISSUING
+
+
+def test_ocsp_absent_not_flagged_when_ocsp_url_present() -> None:
+    cert = _cert("CN=WithOCSP", ocsp_urls=("http://ocsp/ocsp",))
+    ca = _ca("IssuingCA", certs=(cert,))
+    assert detect_ocsp_absence(_estate(cas=(ca,))) == []
+
+
+def test_ocsp_absent_skips_root_ca() -> None:
+    cert = _cert("CN=Root", kind=CertKind.ROOT_CA, ocsp_urls=())
+    ca = _ca("RootCA", kind=CaKind.ROOT, certs=(cert,))
+    assert detect_ocsp_absence(_estate(cas=(ca,))) == []
+
+
+def test_ocsp_absent_degrades_without_certs() -> None:
+    cert = _cert("CN=NoOCSP", ocsp_urls=())
+    ca = _ca("IssuingCA", certs=(cert,))
+    assert detect_ocsp_absence(_estate(cas=(ca,), certs_parsed=False)) == []
+
+
+def test_ocsp_absent_wired_into_run_all() -> None:
+    cert = _cert("CN=NoOCSP", ocsp_urls=())
+    ca = _ca("IssuingCA", certs=(cert,))
+    checks = {f.check for f in run_all(_estate(cas=(ca,)))}
+    assert "OCSP_URL_ABSENT" in checks
+
+
+# --- CDP / AIA URL absence (WI-032) ------------------------------------------
+
+
+def test_cdp_aia_absent_flagged_when_both_missing() -> None:
+    cert = _cert("CN=NoURLs", cdp_urls=(), aia_urls=())
+    ca = _ca("IssuingCA", certs=(cert,))
+    findings = detect_cdp_aia_absence(_estate(cas=(ca,)))
+    assert len(findings) == 1
+    assert findings[0].check == "CDP_AIA_ABSENT"
+    assert findings[0].severity == Severity.MEDIUM
+    assert findings[0].subject == "IssuingCA"
+    assert findings[0].tier == CrlTier.ISSUING
+    assert "cannot fetch revocation data or build the certificate chain" in findings[0].detail
+
+
+def test_cdp_aia_absent_not_flagged_when_both_present() -> None:
+    cert = _cert("CN=WithURLs", cdp_urls=("http://crl/crl.crl",), aia_urls=("http://aia/ca.cer",))
+    ca = _ca("IssuingCA", certs=(cert,))
+    assert detect_cdp_aia_absence(_estate(cas=(ca,))) == []
+
+
+def test_cdp_aia_absent_flagged_when_only_cdp_missing() -> None:
+    cert = _cert("CN=NoCDP", cdp_urls=(), aia_urls=("http://aia/ca.cer",))
+    ca = _ca("IssuingCA", certs=(cert,))
+    findings = detect_cdp_aia_absence(_estate(cas=(ca,)))
+    assert len(findings) == 1
+    assert "CRL Distribution Points" in findings[0].detail
+    assert "Authority Information Access" not in findings[0].detail
+    assert "cannot fetch revocation data (CRL)" in findings[0].detail
+    assert "build the certificate chain" not in findings[0].detail
+
+
+def test_cdp_aia_absent_flagged_when_only_aia_missing() -> None:
+    cert = _cert("CN=NoAIA", cdp_urls=("http://crl/crl.crl",), aia_urls=())
+    ca = _ca("IssuingCA", certs=(cert,))
+    findings = detect_cdp_aia_absence(_estate(cas=(ca,)))
+    assert len(findings) == 1
+    assert "Authority Information Access" in findings[0].detail
+    assert "CRL Distribution Points" not in findings[0].detail
+    assert "cannot build the certificate chain (CA issuer info)" in findings[0].detail
+    assert "revocation data" not in findings[0].detail
+
+
+def test_cdp_aia_absent_skips_root_ca() -> None:
+    cert = _cert("CN=Root", kind=CertKind.ROOT_CA, cdp_urls=(), aia_urls=())
+    ca = _ca("RootCA", kind=CaKind.ROOT, certs=(cert,))
+    assert detect_cdp_aia_absence(_estate(cas=(ca,))) == []
+
+
+def test_cdp_aia_absent_degrades_without_certs() -> None:
+    cert = _cert("CN=NoURLs", cdp_urls=(), aia_urls=())
+    ca = _ca("IssuingCA", certs=(cert,))
+    assert detect_cdp_aia_absence(_estate(cas=(ca,), certs_parsed=False)) == []
+
+
+def test_cdp_aia_absent_wired_into_run_all() -> None:
+    cert = _cert("CN=NoURLs", cdp_urls=(), aia_urls=())
+    ca = _ca("IssuingCA", certs=(cert,))
+    checks = {f.check for f in run_all(_estate(cas=(ca,)))}
+    assert "CDP_AIA_ABSENT" in checks
