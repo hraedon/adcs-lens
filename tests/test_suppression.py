@@ -66,7 +66,39 @@ def test_load_valid_suppressions(tmp_path: Path) -> None:
     assert rules[1].check == "ESC15"
     assert rules[1].subject is None
     assert rules[1].reason == "patched"
-    assert rules[1].expires == datetime(2026, 12, 31, 0, 0, 0, tzinfo=UTC)
+    # Date-only expiry means "valid through that whole day": end-of-day UTC.
+    assert rules[1].expires == datetime(2026, 12, 31, 23, 59, 59, 999999, tzinfo=UTC)
+
+
+def test_load_date_only_expires_is_active_through_that_day(tmp_path: Path) -> None:
+    path = tmp_path / "suppressions.json"
+    _write_suppressions(
+        path,
+        {"suppressions": [{"check": "ESC8", "reason": "x", "expires": "2026-12-31"}]},
+    )
+    (rule,) = load_suppressions(path)
+    finding = _finding(check="ESC8")
+    # Midday on the expiry date: the rule must still suppress.
+    result = apply_suppressions(
+        [finding], (rule,), now=datetime(2026, 12, 31, 12, 0, 0, tzinfo=UTC)
+    )
+    assert result.suppressed == (finding,)
+    assert result.expired == ()
+    # The following day: expired.
+    result = apply_suppressions([finding], (rule,), now=datetime(2027, 1, 1, 0, 0, 0, tzinfo=UTC))
+    assert result.suppressed == ()
+    assert result.expired == (rule,)
+
+
+def test_load_datetime_expires_is_preserved(tmp_path: Path) -> None:
+    path = tmp_path / "suppressions.json"
+    _write_suppressions(
+        path,
+        {"suppressions": [{"check": "ESC8", "reason": "x", "expires": "2026-12-31T08:30:00"}]},
+    )
+    (rule,) = load_suppressions(path)
+    # An explicit time component is taken literally (assumed UTC when naive).
+    assert rule.expires == datetime(2026, 12, 31, 8, 30, 0, tzinfo=UTC)
 
 
 def test_load_missing_suppressions_key(tmp_path: Path) -> None:

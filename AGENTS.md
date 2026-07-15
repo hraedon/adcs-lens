@@ -78,6 +78,15 @@ exports (WI-001), never from a standing connection.
 
 ## Status
 
+**PARKED at v1.1.0 (2026-07-15) — feature-complete for the charter; no active
+development planned.** The repo is public, released, and CI-gated (including a
+monthly scheduled run as a rot canary). Re-entry starts here: the open work
+items in the work-item store (WI-042 structured `Finding` metadata for the
+SARIF SID, WI-043 `_finding_with_consequence` dedup) are the parked backlog;
+`docs/review-findings.md` holds older deferred findings. If the scheduled CI
+run has gone red since the park date, fix CI first — it is dependency/runner
+rot, not a regression in the code.
+
 The deterministic core is built and tested (ingest → `doctor` → `diff`, ESC1–ESC11,
 ESC13–ESC16 detectors — ESC12 has no static-detectability boundary — plus
 crypto/operational hygiene detectors `WEAK_SIG_ALG` / `WEAK_KEY_SIZE` /

@@ -46,6 +46,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `pip install adcs-lens[certs]`.
 
 ### Fixed
+- **Suppression date-only expiry (WI-041)**: a date-only `expires` value
+  (`"2026-12-31"`) now keeps the rule active through the end of that day
+  (UTC) instead of expiring at the midnight that starts it. An explicit ISO
+  datetime is honored literally (assumed UTC when naive).
 - **Collector v0.6.1**: LDAP `SecurityMasks` now requests `Dacl,Owner` (was
   `Dacl` only), so template and PKI-object `owner_sid` fields are actually
   populated. In v0.6.0 these were always empty — the owner-based ESC4/ESC5

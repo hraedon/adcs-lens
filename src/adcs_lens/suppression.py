@@ -7,13 +7,16 @@ stderr for auditability.
 
 Pure, stdlib-only. The suppression file is the operator's documented
 risk-acceptance record — each rule carries a reason and optional expiry.
+A date-only ``expires`` value ("2026-12-31") keeps the rule active through
+the end of that day (UTC); a full ISO datetime is honored literally
+(assumed UTC when no offset is given).
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 
 from adcs_lens.detection import Finding
@@ -87,11 +90,17 @@ def load_suppressions(path: str | Path) -> tuple[SuppressionRule, ...]:
             if not isinstance(expires_raw, str):
                 raise ValueError(f"suppression entry {i} 'expires' must be an ISO date string")
             try:
-                parsed = datetime.fromisoformat(expires_raw)
-            except ValueError as exc:
-                raise ValueError(
-                    f"suppression entry {i} 'expires' is not a valid ISO date: {exc}"
-                ) from exc
+                # A date-only value ("2026-12-31") means the rule is valid
+                # through that whole day: expire at end-of-day UTC, not at
+                # the midnight that starts it.
+                parsed = datetime.combine(date.fromisoformat(expires_raw), time.max, tzinfo=UTC)
+            except ValueError:
+                try:
+                    parsed = datetime.fromisoformat(expires_raw)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"suppression entry {i} 'expires' is not a valid ISO date: {exc}"
+                    ) from exc
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=UTC)
             expires = parsed

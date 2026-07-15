@@ -7,6 +7,12 @@ misconfiguration, and certificate lifecycle. The deterministic core has **no AI
 in the truth path** — the LLM layer only narrates facts the core already
 computed.
 
+> **Project status:** stable at v1.1.0 and feature-complete for its charter
+> (the full statically-detectable ESC family plus lifecycle/hygiene checks).
+> Not under active development; maintained passively — security reports (see
+> `SECURITY.md`) and bug reports are welcome, but there is no feature roadmap
+> or response-time commitment.
+
 ## Why this exists
 
 Microsoft effectively froze AD CS over a decade ago. The misconfigurations are
