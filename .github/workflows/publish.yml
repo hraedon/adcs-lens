@@ -1,8 +1,12 @@
 name: Publish to PyPI
 
+# Parked posture: PYPI_API_TOKEN / the `pypi` environment are not configured,
+# so a release-triggered run would always fail at the publish job. Manual
+# dispatch only until the owner configures the token — then restore
+# `release: types: [published]` as the trigger and flip README's install
+# section back to PyPI-first.
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: read

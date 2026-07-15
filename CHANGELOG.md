@@ -41,9 +41,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   for CI/GRC integration of drift reports.
 - **ESC7 SID in SARIF (WI-035)**: ESC7 findings include a `properties.sid`
   field in SARIF output.
-- **PyPI publishing (WI-039)**: GitHub Action workflow (`.github/workflows/
-  publish.yml`) publishes to PyPI on release. The package is installable via
-  `pip install adcs-lens[certs]`.
+- **PyPI publishing workflow (WI-039)**: GitHub Action workflow
+  (`.github/workflows/publish.yml`) that builds and publishes to PyPI.
+  Currently manual-dispatch only — no PyPI release exists yet and the
+  `PYPI_API_TOKEN` secret / `pypi` environment are not configured; install
+  from git (see README) until then.
 
 ### Fixed
 - **Suppression date-only expiry (WI-041)**: a date-only `expires` value
