@@ -78,7 +78,7 @@ exports (WI-001), never from a standing connection.
 
 ## Status
 
-**PARKED at v1.1.0 (2026-07-15) — feature-complete for the charter; no active
+**PARKED at v1.1.1 (2026-07-16) — feature-complete for the charter; no active
 development planned.** The repo is public, released, and CI-gated (including a
 monthly scheduled run as a rot canary). Re-entry starts here: the open work
 items in the work-item store (WI-042 structured `Finding` metadata for the

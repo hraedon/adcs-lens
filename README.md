@@ -7,7 +7,7 @@ misconfiguration, and certificate lifecycle. The deterministic core has **no AI
 in the truth path** — the LLM layer only narrates facts the core already
 computed.
 
-> **Project status:** stable at v1.1.0 and feature-complete for its charter
+> **Project status:** stable at v1.1.1 and feature-complete for its charter
 > (the full statically-detectable ESC family plus lifecycle/hygiene checks).
 > Not under active development; maintained passively — security reports (see
 > `SECURITY.md`) and bug reports are welcome, but there is no feature roadmap
@@ -105,6 +105,41 @@ enable CA/CRL (DER) lifecycle parsing — cert/CRL expiry, CRL early-warning, we
 signing algorithm, and CA-cert key-size checks. Without `[certs]`, lifecycle
 fields are `None` and those checks degrade to an explicit coverage note rather
 than producing wrong answers.
+
+### Windows (installer script)
+
+For a dedicated analysis host or a tier-0 admin box, use the Windows installer
+script. It creates a venv under `C:\ProgramData\adcs-lens`, installs adcs-lens
+with the `[certs]` extra, and verifies the CLI entry point:
+
+```powershell
+# From an elevated PowerShell, in the repo root:
+powershell -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
+
+# Custom install directory:
+powershell -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1 -InstallDir D:\adcs-lens
+
+# Air-gapped host without a C compiler (skip [certs]; lifecycle checks degrade to notes):
+powershell -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1 -NoCerts
+```
+
+The installer handles Python 3.12+ discovery (including the Python Install
+Manager and Windows Store stubs), copies a user-scoped Python to a shared
+location if needed (so scheduled tasks and SSH sessions can reach it), and is
+safe to re-run (upgrades the package in place). To refresh the shared Python
+after upgrading your system Python, run `uninstall-windows.ps1 -RemoveData`
+first. After install, the CLI is at
+`C:\ProgramData\adcs-lens\venv\Scripts\adcs-lens.exe`.
+
+To uninstall:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\uninstall-windows.ps1
+# Also remove the shared Python:
+powershell -ExecutionPolicy Bypass -File .\scripts\uninstall-windows.ps1 -RemoveData
+```
+
+### pip install
 
 ```bash
 # From the latest main branch (recommended):

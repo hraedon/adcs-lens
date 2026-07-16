@@ -101,6 +101,27 @@ jobs:
           $r = Invoke-Pester -Path tests/collector/Collector.Tests.ps1 -Output Detailed -PassThru
           if ($r.FailedCount -gt 0) { exit 1 }
 
+  installer-helpers:
+    # The Windows installer's pure helper functions (version parsing, shared-
+    # Python detection) are unit-tested on Linux pwsh via dot-sourcing.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Install Pester
+        shell: pwsh
+        run: Install-Module Pester -Scope CurrentUser -Force -SkipPublisherCheck -MinimumVersion 5.0
+
+      - name: Run installer helper tests
+        shell: pwsh
+        run: |
+          $r = Invoke-Pester -Path tests/powershell/install-windows.Tests.ps1 -Output Detailed -PassThru
+          if ($r.FailedCount -gt 0) { exit 1 }
+
   collector-windows:
     # _parseAces uses System.DirectoryServices (.NET) to decode an
     # nTSecurityDescriptor (the ESC1/4/5/7 input) — can't run on Linux pwsh, so it
@@ -121,4 +142,10 @@ jobs:
         shell: powershell
         run: |
           $r = Invoke-Pester -Path tests/collector/windows -Output Detailed -PassThru
+          if ($r.FailedCount -gt 0) { exit 1 }
+
+      - name: Run installer helper tests (PS 5.1)
+        shell: powershell
+        run: |
+          $r = Invoke-Pester -Path tests/powershell/install-windows.Tests.ps1 -Output Detailed -PassThru
           if ($r.FailedCount -gt 0) { exit 1 }

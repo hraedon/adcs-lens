@@ -4,6 +4,22 @@ All notable changes to adcs-lens are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] — 2026-07-16
+
+### Added
+- **Windows installer** (`scripts/install-windows.ps1`): creates a venv under
+  `C:\ProgramData\adcs-lens`, installs adcs-lens with the `[certs]` extra, and
+  verifies the CLI entry point. Handles Python 3.12+ discovery (including the
+  Python Install Manager and Windows Store stubs), copies a user-scoped Python
+  to a shared location for scheduled tasks / SSH sessions, and is safe to re-run
+  (upgrades in place). A `-NoCerts` switch skips the `[certs]` extra for
+  air-gapped hosts without a C compiler. Pester-tested helper functions
+  (version parsing, shared-Python detection) run in CI on Linux pwsh.
+- **Windows uninstaller** (`scripts/uninstall-windows.ps1`): removes the venv
+  and optionally the shared Python install (`-RemoveData`). Safe to re-run.
+- **CI job** (`installer-helpers`): Pester tests for the installer's pure helper
+  functions, running on Linux pwsh alongside the collector helper tests.
+
 ## [1.1.0] — 2026-07-14
 
 ### Added
