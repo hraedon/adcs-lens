@@ -616,7 +616,7 @@ if ($CollectDcMapping) {
   # the manifest surfaces the gap rather than reporting all-unknown as "ran".
   $wmiFailures = ($dcConfigs | Where-Object { $_.strong_certificate_binding_enforcement -eq 'unknown' }).Count
   if ($dcConfigs.Count -gt 0 -and $wmiFailures -eq $dcConfigs.Count) {
-    Write-Warning "esc10-dc-registry: all $($dcConfigs.Count) DC(s) returned unknown — pass effectively skipped (WMI access denied? provide -DcRegistryUserB64/-DcRegistryPassB64 for SSH/double-hop)."
+    Write-Warning "esc10-dc-registry: all $($dcConfigs.Count) DC(s) returned unknown -- pass effectively skipped (WMI access denied? provide -DcRegistryUserB64/-DcRegistryPassB64 for SSH/double-hop)."
     $esc10Skipped = $true
   } else {
     $esc10Skipped = $false

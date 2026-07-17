@@ -45,7 +45,7 @@ param(
 )
 
 # Guard: only run the main body when executed directly. Dot-sourcing is safe
-# (loads nothing — the uninstaller has no extracted helper functions — and does
+# (loads nothing -- the uninstaller has no extracted helper functions -- and does
 # not execute the removal logic).
 if ($MyInvocation.InvocationName -ne ".") {
 
