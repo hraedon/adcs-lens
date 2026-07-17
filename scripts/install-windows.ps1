@@ -400,7 +400,7 @@ if ($MyInvocation.InvocationName -ne ".") {
     Write-Host ""
     Write-Host "Typical workflow:"
     Write-Host "  1. Export the PKI config on the CA (read-only):"
-    Write-Host "     scripts\Export-AdcsEstate.ps1 -OutputDir C:\AdcsExport"
+    Write-Host "     scripts\Export-AdcsEstate.ps1 -OutDir C:\AdcsExport"
     Write-Host "  2. Analyze the export:"
     Write-Host "     & `"$adcsLensExe`" doctor C:\AdcsExport"
     Write-Host "     & `"$adcsLensExe`" doctor C:\AdcsExport --json"

@@ -4,6 +4,20 @@ All notable changes to adcs-lens are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] — 2026-07-16
+
+### Changed
+- **Collector v0.7.0**: LDAP credentials are now optional. By default the
+  collector uses the current user's integrated Windows credentials (mirroring
+  the gpo-lens collector), so you can run it interactively as a Domain Admin
+  without base64-encoding anything:
+  `scripts/Export-AdcsEstate.ps1 -OutDir C:\AdcsExport`
+  For key-based SSH sessions (the double-hop problem), pass explicit creds
+  via `-LdapUserB64` / `-LdapPassB64` as before. The DC registry pass
+  (`-CollectDcMapping`) likewise defaults to integrated creds when
+  `-DcRegistryUserB64` / `-DcRegistryPassB64` are omitted. Providing only one
+  of a credential pair is now an error (was a silent misbind).
+
 ## [1.1.1] — 2026-07-16
 
 ### Added

@@ -7,7 +7,7 @@ misconfiguration, and certificate lifecycle. The deterministic core has **no AI
 in the truth path** — the LLM layer only narrates facts the core already
 computed.
 
-> **Project status:** stable at v1.1.1 and feature-complete for its charter
+> **Project status:** stable at v1.1.2 and feature-complete for its charter
 > (the full statically-detectable ESC family plus lifecycle/hygiene checks).
 > Not under active development; maintained passively — security reports (see
 > `SECURITY.md`) and bug reports are welcome, but there is no feature roadmap
@@ -160,7 +160,17 @@ package when network access is unavailable.
 
 ```powershell
 # On the CA / a tier-0 admin box, export the PKI config (read-only):
-scripts/Export-AdcsEstate.ps1 -OutputDir C:\AdcsExport
+# Run as a Domain Admin (or an account with read access to the PKI container) —
+# the collector uses your current Windows credentials by default:
+scripts/Export-AdcsEstate.ps1 -OutDir C:\AdcsExport
+
+# For key-based SSH sessions (double-hop), pass explicit LDAP creds (base64):
+$u = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("user@domain.local"))
+$p = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("password"))
+scripts/Export-AdcsEstate.ps1 -OutDir C:\AdcsExport -LdapUserB64 $u -LdapPassB64 $p
+
+# Opt-in ESC10/ESC14 DC certificate-mapping passes:
+scripts/Export-AdcsEstate.ps1 -OutDir C:\AdcsExport -CollectDcMapping
 ```
 
 ```bash

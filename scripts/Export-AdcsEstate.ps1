@@ -7,20 +7,32 @@
     * CA registry config via `certutil -getreg` (policy EditFlags, CA
       InterfaceFlags, AuditFilter, policy DisableExtensionList) — read locally
       on the CA host.
-    * AD Public Key Services objects via LDAP with EXPLICIT credentials
-      (enrollment services, certificate templates, enterprise OIDs).
+    * AD Public Key Services objects via LDAP (enrollment services, certificate
+      templates, enterprise OIDs).
 
   It NEVER enrolls, requests, writes, or relays. It only reads. Output is a
   directory of JSON files matching adcs_lens.ingest's contract.
 
-  Auth note: a key-based SSH logon has no network credential (double-hop), so
-  LDAP binds use explicit creds passed as base64 (avoids quoting + argv exposure).
+  Auth: by default the script uses the current user's integrated Windows
+  credentials (run as a Domain Admin or an account with read access to the
+  PKI container). This mirrors the gpo-lens collector's approach and is the
+  simplest path when running interactively on the CA or a tier-0 admin box.
+
+  For key-based SSH sessions (where the network credential is not delegated —
+  the double-hop problem), pass explicit LDAP credentials via -LdapUserB64 /
+  -LdapPassB64 (base64-encoded to avoid quoting + argv exposure). When both
+  are provided, the script binds with them; when neither is provided, it
+  binds with integrated auth.
 
 .PARAMETER OutDir
   Directory to write the export into (created if absent).
 
 .PARAMETER LdapUserB64 / .PARAMETER LdapPassB64
-  Base64 (UTF-8) of the LDAP bind username (UPN or DOMAIN\user) and password.
+  Optional. Base64 (UTF-8) of the LDAP bind username (UPN or DOMAIN\user)
+  and password. When BOTH are provided, the script uses explicit LDAP
+  binds (needed for key-based SSH / double-hop). When BOTH are omitted
+  (the default), the script uses the current user's integrated credentials.
+  Providing only one is an error.
 
 .PARAMETER CollectDcMapping
   Opt in to the ESC10/ESC14 DC certificate-mapping passes (they widen the export
@@ -28,16 +40,20 @@
   principal altSecurityIdentities). Without it both passes are skipped + noted.
 
 .PARAMETER DcRegistryUserB64 / .PARAMETER DcRegistryPassB64
-  Base64 (UTF-8) creds with remote-registry read on the domain controllers, used
-  by the esc10-dc-registry pass (KDC StrongCertificateBindingEnforcement + Schannel
-  CertificateMappingMethods via WMI). Only used when -CollectDcMapping is set; if
-  absent the esc10-dc-registry pass is skipped + noted.
+  Optional. Base64 (UTF-8) creds with remote-registry read on the domain
+  controllers, used by the esc10-dc-registry pass (KDC
+  StrongCertificateBindingEnforcement + Schannel CertificateMappingMethods via
+  WMI). Only used when -CollectDcMapping is set. When omitted, the pass uses
+  the current user's integrated credentials (WMI without -Credential). When
+  provided, the pass binds with them.
 #>
 [CmdletBinding(DefaultParameterSetName = 'Collect')]
 param(
   [Parameter(Mandatory, ParameterSetName = 'Collect')] [string] $OutDir,
-  [Parameter(Mandatory, ParameterSetName = 'Collect')] [string] $LdapUserB64,
-  [Parameter(Mandatory, ParameterSetName = 'Collect')] [string] $LdapPassB64,
+  # Optional: explicit LDAP creds for SSH / double-hop. When both are omitted,
+  # the script uses the current user's integrated credentials (default).
+  [Parameter(ParameterSetName = 'Collect')] [string] $LdapUserB64,
+  [Parameter(ParameterSetName = 'Collect')] [string] $LdapPassB64,
   # ESC10/ESC14 DC certificate-mapping passes widen the export footprint, so they
   # are opt-in. When set, esc14-altsecid (LDAP altSecurityIdentities) runs; the
   # esc10-dc-registry pass additionally needs DC-admin creds for remote registry.
@@ -51,7 +67,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$COLLECTOR_VERSION = '0.6.2'
+$COLLECTOR_VERSION = '0.7.0'
 
 function _b64([string]$s) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($s)) }
 
@@ -66,12 +82,26 @@ function _writeJson($obj, [string]$name) {
   [IO.File]::WriteAllText($p, $script:JS.Serialize($obj), (New-Object Text.UTF8Encoding($false)))
 }
 
-# --- LDAP plumbing (explicit creds) -----------------------------------------
+# --- LDAP plumbing -----------------------------------------------------------
+# _ldapEntry builds a DirectoryEntry with or without explicit credentials.
+# When $LdapUser is set (explicit creds via -LdapUserB64), it binds with them
+# (needed for key-based SSH / double-hop). When $LdapUser is empty (the
+# default), it binds with the current user's integrated credentials — mirroring
+# the gpo-lens collector's approach of assuming DA when running interactively.
+function _ldapEntry([string]$path) {
+  if ($LdapUser) {
+    New-Object DirectoryServices.DirectoryEntry($path, $LdapUser, $LdapPass)
+  } else {
+    New-Object DirectoryServices.DirectoryEntry($path)
+  }
+}
+function _ldapRootDse() { _ldapEntry 'LDAP://RootDSE' }
+
 function _ldapRoot([string]$container) {
-  $cfg = (New-Object DirectoryServices.DirectoryEntry("LDAP://RootDSE", $LdapUser, $LdapPass)).configurationNamingContext
+  $cfg = (_ldapRootDse).configurationNamingContext
   $path = if ($container) { "LDAP://$container,CN=Public Key Services,CN=Services,$cfg" }
           else { "LDAP://CN=Public Key Services,CN=Services,$cfg" }
-  New-Object DirectoryServices.DirectoryEntry($path, $LdapUser, $LdapPass)
+  _ldapEntry $path
 }
 function _search([DirectoryServices.DirectoryEntry]$root, [string]$filter) {
   $s = New-Object DirectoryServices.DirectorySearcher($root)
@@ -228,7 +258,7 @@ function _parseAces([byte[]]$sdBytes) {
 # ACEs via _parseAces. Pure LDAP against the Configuration NC — no certutil, so
 # this pass runs from any domain member with the explicit bind creds.
 function _objAcl([string]$dn, [string]$kind) {
-  $de = New-Object DirectoryServices.DirectoryEntry("LDAP://$dn", $LdapUser, $LdapPass)
+  $de = _ldapEntry "LDAP://$dn"
   $s = New-Object DirectoryServices.DirectorySearcher($de)
   $s.SearchScope = 'Base'; $s.Filter = '(objectClass=*)'
   $s.SecurityMasks = [DirectoryServices.SecurityMasks]'Dacl,Owner'
@@ -241,7 +271,7 @@ function _objAcl([string]$dn, [string]$kind) {
 # Enumerate child objects under a container and tokenise each one's DACL.
 function _childAcls([string]$containerDn, [string]$filter, [string]$kind) {
   $out = @()
-  $root = New-Object DirectoryServices.DirectoryEntry("LDAP://$containerDn", $LdapUser, $LdapPass)
+  $root = _ldapEntry "LDAP://$containerDn"
   foreach ($r in (_search $root $filter)) {
     $dn  = [string]$r.Properties['distinguishedname'][0]
     $sdb = if ($r.Properties['ntsecuritydescriptor'].Count) { [byte[]]$r.Properties['ntsecuritydescriptor'][0] } else { $null }
@@ -329,8 +359,41 @@ function _certutilMultiSz([string]$regpath) { _parseCertutilMultiSzLines (& cert
 # this script with -FunctionsOnly and stops here; nothing below runs in that mode.
 if ($PSCmdlet.ParameterSetName -eq 'SelfTest') { return }
 
-$LdapUser = _b64 $LdapUserB64
-$LdapPass = _b64 $LdapPassB64
+# --- Credential resolution ---------------------------------------------------
+# When both -LdapUserB64 and -LdapPassB64 are provided, decode them and use
+# explicit LDAP binds (needed for key-based SSH / double-hop). When both are
+# omitted (the default), leave $LdapUser/$LdapPass empty so _ldapEntry binds
+# with the current user's integrated credentials. Providing only one is an
+# error — a half-specified credential pair would silently bind as the wrong
+# identity.
+$LdapUser = ''
+$LdapPass = ''
+if ($LdapUserB64 -or $LdapPassB64) {
+  if (-not ($LdapUserB64 -and $LdapPassB64)) {
+    throw "Provide BOTH -LdapUserB64 and -LdapPassB64 for explicit LDAP creds, or NEITHER for integrated auth (current user)."
+  }
+  $LdapUser = _b64 $LdapUserB64
+  $LdapPass = _b64 $LdapPassB64
+}
+if ($LdapUser) {
+  Write-Host "Using explicit LDAP credentials ($LdapUser)"
+} else {
+  Write-Host "Using integrated auth (current user) for LDAP"
+}
+
+# DC registry creds: same pattern. When both provided, use them; when both
+# omitted, the esc10-dc-registry pass uses the current user's integrated creds.
+# Only validated when -CollectDcMapping is set (otherwise the creds are never
+# used).
+$DcRegistryUser = ''
+$DcRegistryPass = ''
+if ($CollectDcMapping -and ($DcRegistryUserB64 -or $DcRegistryPassB64)) {
+  if (-not ($DcRegistryUserB64 -and $DcRegistryPassB64)) {
+    throw "Provide BOTH -DcRegistryUserB64 and -DcRegistryPassB64 for explicit DC creds, or NEITHER for integrated auth."
+  }
+  $DcRegistryUser = _b64 $DcRegistryUserB64
+  $DcRegistryPass = _b64 $DcRegistryPassB64
+}
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 Add-Type -AssemblyName System.Web.Extensions
 $script:JS = New-Object System.Web.Script.Serialization.JavaScriptSerializer
@@ -418,7 +481,7 @@ foreach ($r in (_search $oidRoot '(objectClass=msPKI-Enterprise-Oid)')) {
 # Capture DACLs on the Public Key Services containers + CA objects. A low-priv
 # trustee with object-control rights (WriteDacl/WriteOwner/GenericWrite/
 # GenericAll) on any of these is the ESC5 escalation primitive.
-$cfgNc = (New-Object DirectoryServices.DirectoryEntry("LDAP://RootDSE", $LdapUser, $LdapPass)).configurationNamingContext
+$cfgNc = (_ldapRootDse).configurationNamingContext
 $pksDn = "CN=Public Key Services,CN=Services,$cfgNc"
 $pkiAcls = @()
 foreach ($pair in @(
@@ -484,11 +547,11 @@ $principalMappings = @()
 $esc10Skipped = $true
 $esc14Skipped = $true
 if ($CollectDcMapping) {
-  $domNc = (New-Object DirectoryServices.DirectoryEntry("LDAP://RootDSE", $LdapUser, $LdapPass)).defaultNamingContext
+  $domNc = (_ldapRootDse).defaultNamingContext
 
   # esc14-altsecid: every principal carrying an altSecurityIdentities value.
   try {
-    $domRoot = New-Object DirectoryServices.DirectoryEntry("LDAP://$domNc", $LdapUser, $LdapPass)
+    $domRoot = _ldapEntry "LDAP://$domNc"
     $s = New-Object DirectoryServices.DirectorySearcher($domRoot)
     $s.Filter = '(altSecurityIdentities=*)'; $s.PageSize = 200; $s.SearchScope = 'Subtree'
     [void]$s.PropertiesToLoad.Add('distinguishedName')
@@ -503,45 +566,59 @@ if ($CollectDcMapping) {
     $esc14Skipped = $false
   } catch { Write-Warning "esc14-altsecid failed: $($_.Exception.Message)" }
 
-  # esc10-dc-registry: per-DC KDC + Schannel registry (needs DC-admin creds).
-  if ($DcRegistryUserB64 -and $DcRegistryPassB64) {
-    $HKLM = [uint32]2147483650
+  # esc10-dc-registry: per-DC KDC + Schannel registry. Uses explicit DC creds
+  # when both -DcRegistryUserB64/-DcRegistryPassB64 are provided; otherwise
+  # uses the current user's integrated credentials.
+  $HKLM = [uint32]2147483650
+  $dcCred = $null
+  if ($DcRegistryUser) {
     $dcCred = New-Object Management.Automation.PSCredential(
-      (_b64 $DcRegistryUserB64),
-      (ConvertTo-SecureString (_b64 $DcRegistryPassB64) -AsPlainText -Force))
-    $localHost = ([string](hostname)).ToLower()
-    # Discover DCs from the domain NC (server-trust accounts: UAC bit 0x2000).
-    $dcRoot = New-Object DirectoryServices.DirectoryEntry("LDAP://$domNc", $LdapUser, $LdapPass)
-    $ds = New-Object DirectoryServices.DirectorySearcher($dcRoot)
-    $ds.Filter = '(&(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))'
-    $ds.PageSize = 200; $ds.SearchScope = 'Subtree'; [void]$ds.PropertiesToLoad.Add('dnshostname')
-    foreach ($r in $ds.FindAll()) {
-      $dcDns = [string]$r.Properties['dnshostname'][0]
-      if (-not $dcDns) { continue }
-      $binding = 'unknown'; $schannelMethods = @()
-      try {
-        if ($dcDns.ToLower() -eq $localHost -or $dcDns.ToLower().StartsWith($localHost + '.')) {
-          $reg = Get-WmiObject -Namespace 'root\default' -Class StdRegProv -List
-        } else {
-          $reg = Get-WmiObject -ComputerName $dcDns -Credential $dcCred -Namespace 'root\default' -Class StdRegProv -List
-        }
-        $kdc = $reg.GetDWORDValue($HKLM, 'SYSTEM\CurrentControlSet\Services\Kdc', 'StrongCertificateBindingEnforcement')
-        if ($kdc.ReturnValue -eq 0 -and $null -ne $kdc.uValue) {
-          $binding = _decodeBinding ([int]$kdc.uValue)
-        }
-        $sch = $reg.GetDWORDValue($HKLM, 'SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL', 'CertificateMappingMethods')
-        if ($sch.ReturnValue -eq 0 -and $null -ne $sch.uValue) {
-          # _decode iterates entries by key/value — indexing an [ordered] dict with
-          # an int key selects BY POSITION, which silently mis-decodes the bits.
-          $schannelMethods = _decode ([int]$sch.uValue) $SCHANNEL_BITS
-        }
-      } catch { Write-Warning "esc10-dc-registry $dcDns failed: $($_.Exception.Message)" }
-      $dcConfigs += [ordered]@{
-        name                                   = $dcDns
-        strong_certificate_binding_enforcement = $binding
-        schannel_mapping_methods               = (@($schannelMethods))
+      $DcRegistryUser,
+      (ConvertTo-SecureString $DcRegistryPass -AsPlainText -Force))
+  }
+  $localHost = ([string](hostname)).ToLower()
+  # Discover DCs from the domain NC (server-trust accounts: UAC bit 0x2000).
+  $dcRoot = _ldapEntry "LDAP://$domNc"
+  $ds = New-Object DirectoryServices.DirectorySearcher($dcRoot)
+  $ds.Filter = '(&(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))'
+  $ds.PageSize = 200; $ds.SearchScope = 'Subtree'; [void]$ds.PropertiesToLoad.Add('dnshostname')
+  foreach ($r in $ds.FindAll()) {
+    $dcDns = [string]$r.Properties['dnshostname'][0]
+    if (-not $dcDns) { continue }
+    $binding = 'unknown'; $schannelMethods = @()
+    try {
+      if ($dcDns.ToLower() -eq $localHost -or $dcDns.ToLower().StartsWith($localHost + '.')) {
+        $reg = Get-WmiObject -Namespace 'root\default' -Class StdRegProv -List
+      } elseif ($dcCred) {
+        $reg = Get-WmiObject -ComputerName $dcDns -Credential $dcCred -Namespace 'root\default' -Class StdRegProv -List
+      } else {
+        $reg = Get-WmiObject -ComputerName $dcDns -Namespace 'root\default' -Class StdRegProv -List
       }
+      $kdc = $reg.GetDWORDValue($HKLM, 'SYSTEM\CurrentControlSet\Services\Kdc', 'StrongCertificateBindingEnforcement')
+      if ($kdc.ReturnValue -eq 0 -and $null -ne $kdc.uValue) {
+        $binding = _decodeBinding ([int]$kdc.uValue)
+      }
+      $sch = $reg.GetDWORDValue($HKLM, 'SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL', 'CertificateMappingMethods')
+      if ($sch.ReturnValue -eq 0 -and $null -ne $sch.uValue) {
+        # _decode iterates entries by key/value — indexing an [ordered] dict with
+        # an int key selects BY POSITION, which silently mis-decodes the bits.
+        $schannelMethods = _decode ([int]$sch.uValue) $SCHANNEL_BITS
+      }
+    } catch { Write-Warning "esc10-dc-registry $dcDns failed: $($_.Exception.Message)" }
+    $dcConfigs += [ordered]@{
+      name                                   = $dcDns
+      strong_certificate_binding_enforcement = $binding
+      schannel_mapping_methods               = (@($schannelMethods))
     }
+  }
+  # The pass ran. If every DC's WMI lookup failed (e.g. double-hop SSH with
+  # LDAP creds but no DC registry creds), treat it as effectively skipped so
+  # the manifest surfaces the gap rather than reporting all-unknown as "ran".
+  $wmiFailures = ($dcConfigs | Where-Object { $_.strong_certificate_binding_enforcement -eq 'unknown' }).Count
+  if ($dcConfigs.Count -gt 0 -and $wmiFailures -eq $dcConfigs.Count) {
+    Write-Warning "esc10-dc-registry: all $($dcConfigs.Count) DC(s) returned unknown — pass effectively skipped (WMI access denied? provide -DcRegistryUserB64/-DcRegistryPassB64 for SSH/double-hop)."
+    $esc10Skipped = $true
+  } else {
     $esc10Skipped = $false
   }
 }
@@ -555,7 +632,7 @@ $manifest = [ordered]@{
   collector_version = $COLLECTOR_VERSION
   collected_at      = (Get-Date).ToUniversalTime().ToString('o')
   host              = [string](hostname)
-  domain            = ((New-Object DirectoryServices.DirectoryEntry("LDAP://RootDSE", $LdapUser, $LdapPass)).defaultNamingContext)
+  domain            = (_ldapRootDse).defaultNamingContext
   skipped_passes    = (@($skippedPasses))
 }
 
