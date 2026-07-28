@@ -16,7 +16,7 @@ def test_doctor_json_flags_esc6(json_export: Path, capsys: pytest.CaptureFixture
     assert rc == 0
     envelope = json.loads(capsys.readouterr().out)
     assert envelope["kind"] == "doctor"
-    assert envelope["schema_version"] == 2
+    assert envelope["schema_version"] == 3
     checks = {f["check"] for f in envelope["findings"]}
     assert "ESC6" in checks
     # The fixture template sets NO_SECURITY_EXTENSION -> ESC9 surfaces end-to-end.
@@ -26,6 +26,12 @@ def test_doctor_json_flags_esc6(json_export: Path, capsys: pytest.CaptureFixture
     # The fixture issuing CA has szOID_NTDS_CA_SECURITY_EXT in DisableExtensionList
     # -> ESC16 surfaces end-to-end (ingest -> field -> detector).
     assert "ESC16" in checks
+    # The fixture CDP container's DACL is unreadable (acl_obtained=False)
+    # -> the PKI_ACL_UNREADABLE gap note surfaces end-to-end, and ESC5 skips it.
+    assert "PKI_ACL_UNREADABLE" in checks
+    assert not any(
+        f["check"] == "ESC5" and "CDP" in f["subject"] for f in envelope["findings"]
+    )
     esc6 = next(f for f in envelope["findings"] if f["check"] == "ESC6")
     assert esc6["severity"] == Severity.CRITICAL.value
     assert isinstance(esc6["consequence"], dict)

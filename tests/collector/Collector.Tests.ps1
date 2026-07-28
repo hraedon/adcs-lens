@@ -115,3 +115,81 @@ Describe '_classifyApp (IIS app path -> endpoint kind)' {
     It 'classifies a CES/CEP path as ces' { _classifyApp '/ADPolicyProvider_CEP_Kerberos' | Should -Be 'ces' }
     It 'returns $null for an unrelated app' { _classifyApp '/owa' | Should -Be $null }
 }
+
+Describe '_caKindFromType (CAType -> CaKind)' {
+    It 'maps Enterprise Root (0) to issuing' { _caKindFromType 0 | Should -Be 'issuing' }
+    It 'maps Enterprise Subordinate (1) to issuing' { _caKindFromType 1 | Should -Be 'issuing' }
+    It 'maps Standalone Root (3) to root' { _caKindFromType 3 | Should -Be 'root' }
+    It 'maps Standalone Subordinate (4) to standalone' { _caKindFromType 4 | Should -Be 'standalone' }
+    It 'maps an unexpected value to issuing (pre-0.8.0 default)' { _caKindFromType 99 | Should -Be 'issuing' }
+    It 'maps $null (CAType unreadable) to issuing' { _caKindFromType $null | Should -Be 'issuing' }
+}
+
+Describe '_safeFileName (DER file names)' {
+    It 'keeps alphanumerics, dots, underscores and hyphens' {
+        _safeFileName 'LAB-CA_01.example.com' | Should -Be 'LAB-CA_01.example.com'
+    }
+    It 'replaces spaces and path-hostile characters with underscores' {
+        _safeFileName 'LAB Issuing CA (old)/2' | Should -Be 'LAB_Issuing_CA__old__2'
+    }
+    It 'produces a name with no directory separator left' {
+        (_safeFileName 'a/b\c:d') | Should -Not -Match '[/\\:]'
+    }
+}
+
+Describe '_certKindFromDer (root vs issuing classification)' {
+    BeforeAll {
+        function _newCert([string]$subject, $issuerCert, [int]$days) {
+            $key = [System.Security.Cryptography.RSA]::Create(2048)
+            $req = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
+                "CN=$subject", $key,
+                [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+                [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+            $now = [System.DateTimeOffset]::UtcNow
+            if ($null -eq $issuerCert) {
+                # A CA needs Basic Constraints for CertificateRequest.Create to
+                # accept it as an issuer for the leaf below.
+                $req.CertificateExtensions.Add(
+                    [System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($true, $false, 0, $true))
+                $cert = $req.CreateSelfSigned($now.AddDays(-1), $now.AddDays($days))
+            } else {
+                $cert = $req.Create($issuerCert, $now.AddDays(-1), $now.AddDays($days), [byte[]](1,2,3,4))
+            }
+            @{ Cert = $cert; Key = $key }
+        }
+        $script:_root = _newCert 'Pester Root' $null 365
+        $script:_leaf = _newCert 'Pester Leaf' $script:_root.Cert 90
+    }
+    AfterAll {
+        foreach ($x in @($script:_root, $script:_leaf)) { if ($x) { $x.Cert.Dispose(); $x.Key.Dispose() } }
+    }
+    It 'classifies a self-signed cert as root_ca' {
+        _certKindFromDer $script:_root.Cert.RawData | Should -Be 'root_ca'
+    }
+    It 'classifies a CA-signed cert as issuing_ca' {
+        _certKindFromDer $script:_leaf.Cert.RawData | Should -Be 'issuing_ca'
+    }
+    It 'returns other for empty input' { _certKindFromDer @() | Should -Be 'other' }
+    It 'returns other for garbage bytes' { _certKindFromDer ([byte[]](1,2,3)) | Should -Be 'other' }
+}
+
+Describe '_classifyApp tightened CEP matching' {
+    It 'still classifies a _CES_ path as ces' { _classifyApp '/contoso_CES_Kerberos' | Should -Be 'ces' }
+    It 'classifies a bare /cep segment as ces' { _classifyApp '/cep' | Should -Be 'ces' }
+    It 'does not false-match a path merely containing cep' { _classifyApp '/concept' | Should -Be $null }
+    It 'does not false-match cep inside a longer segment' { _classifyApp '/reception' | Should -Be $null }
+}
+
+Describe 'scripts are pure ASCII (PS 5.1 BOM-less parse safety)' {
+    # PS 5.1 reads a BOM-less .ps1 as ANSI: a UTF-8 em dash in a *string literal*
+    # once mis-decoded to a quote char and broke parsing (fixed in 5a98907).
+    # Keeping the scripts ASCII-only removes the whole bug class.
+    It 'no .ps1 under scripts/ contains non-ASCII characters' {
+        $bad = @()
+        foreach ($f in (Get-ChildItem "$PSScriptRoot/../../scripts" -Filter *.ps1)) {
+            $bytes = [IO.File]::ReadAllBytes($f.FullName)
+            if ($bytes | Where-Object { $_ -gt 127 }) { $bad += $f.Name }
+        }
+        $bad | Should -Be @()
+    }
+}

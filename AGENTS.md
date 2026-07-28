@@ -78,14 +78,31 @@ exports (WI-001), never from a standing connection.
 
 ## Status
 
-**PARKED at v1.1.2 (2026-07-16) — feature-complete for the charter; no active
-development planned.** The repo is public, released, and CI-gated (including a
-monthly scheduled run as a rot canary). Re-entry starts here: the open work
-items in the work-item store (WI-042 structured `Finding` metadata for the
-SARIF SID, WI-043 `_finding_with_consequence` dedup) are the parked backlog;
-`docs/review-findings.md` holds older deferred findings. If the scheduled CI
-run has gone red since the park date, fix CI first — it is dependency/runner
-rot, not a regression in the code.
+**v1.2.0 (2026-07-28) — resumed from the v1.1.2 park to land collector v0.8.0
+and a core honesty/precision bundle.** The repo is public, released, and
+CI-gated (including a monthly scheduled run as a rot canary). The parked
+backlog (WI-042 structured `Finding.sid`, WI-043 `_finding_with_consequence`
+dedup) is resolved in this release; `docs/review-findings.md` holds older
+deferred findings. If the scheduled CI run has gone red, fix CI first — it is
+dependency/runner rot, not a regression in the code.
+
+The v1.2.0 bundle: collector v0.8.0 gains the **certs/ lifecycle pass**
+(published CA certs from the AIA container + base CRLs from CDP, read from AD
+via plain LDAP — including the powered-off offline root's cert and CRL, the
+catastrophic-but-invisible expiry case), **multi-CA registry honesty**
+(registry hives are local to the collector host: attributed only to that CA;
+remote CAs export `registry_config_collected=false`, ESC6/ESC7/ESC11/ESC16
+skip them, and `CA_REGISTRY_NOT_EVALUATED` names them — also fixing a false
+ESC11 on every remote CA), CAType-derived CA `kind` (incl. a
+standalone-local-CA fallback), and the PKI-object `acl_obtained` marker
+(`PKI_ACL_UNREADABLE`, the ESC5 analogue of the template gap signal). The core
+inverts `is_low_priv_trustee` to a **high-privilege allowlist** (the blocklist
+missed custom groups entirely — a domain-compromise-class ESC1 false
+negative), failing toward flagging with both honesty boundaries documented in
+the `ACL_GROUP_TOKEN_CAVEAT` estate note. `MIN_COLLECTOR_VERSION` is 0.8.0;
+the JSON envelope is `schema_version` 3 (structured `sid`). Collector v0.8.0's
+new passes are Pester/fixture-tested but **not yet live-validated** (tracked
+as WI-044).
 
 The deterministic core is built and tested (ingest → `doctor` → `diff`, ESC1–ESC11,
 ESC13–ESC16 detectors — ESC12 has no static-detectability boundary — plus

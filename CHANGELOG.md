@@ -4,6 +4,78 @@ All notable changes to adcs-lens are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-07-28
+
+### Added
+- **Collector v0.8.0 — certs/ lifecycle pass**: the collector now captures the
+  published CA certificates (AIA-container `cACertificate`) and base CRLs
+  (CDP-container `certificateRevocationList`) from AD via plain LDAP, writing
+  DER files + `certs/index.json`. This runs from any domain member (no
+  certutil) and — crucially — captures the **offline root's** cert and CRL
+  from their published locations: the root box is powered off by design, so
+  its expired CRL is the catastrophic-but-invisible case this pass exists to
+  make detectable. Delta CRLs are skipped (only the base CRL gates chain
+  validation). New Pester-tested helpers: `_caKindFromType`, `_safeFileName`,
+  `_certKindFromDer`.
+- **Multi-CA registry honesty**: CA registry hives (`EditFlags`,
+  `InterfaceFlags`, `AuditFilter`, `DisableExtensionList`, `CA\Security`) are
+  local to the collector host, so they are now attributed only to the local CA
+  (matched on certutil common name + DNS host). Every other enrollment service
+  exports with `registry_config_collected = false`; the registry-gated
+  detectors (ESC6/ESC7/ESC11/ESC16) skip those CAs and a new
+  `CA_REGISTRY_NOT_EVALUATED` INFO note names them — a remote CA never reads
+  as silently clean. This also fixes a false ESC11 on every remote CA (that
+  detector fires on the *absence* of a flag). A standalone CA — never present
+  in Enrollment Services — is now added when it is the local host, with `kind`
+  derived from `CAType` (standalone root → `root`, standalone subordinate →
+  `standalone`).
+- **`PKI_ACL_UNREADABLE` note**: the PKI-object analogue of the template
+  `acl_obtained` marker. When the pki-acls pass ran but an object's
+  `nTSecurityDescriptor` came back unreadable (LDAP denial, corrupt SD), ESC5
+  skips the object and this INFO note surfaces the gap instead of silently
+  clearing it. The collector emits the marker for the well-known fixed
+  containers it could not read at all.
+- **Architecture guards**: executable tests that no core module imports the
+  narration layer and that the CLI reaches it only lazily (inside a function) —
+  the layering rule was previously documented but only half-enforced (narration
+  is itself stdlib-only, so a reverse import passed the stdlib guard silently).
+
+### Changed
+- **Low-privilege trustee classification inverted to an allowlist**
+  (`is_low_priv_trustee`): only the curated high-privilege set (built-in admin
+  and operator groups, SYSTEM/service identities, Enterprise Domain
+  Controllers, and the well-known domain RIDs — Administrator, krbtgt, Domain
+  Admins, Domain Controllers, Cert Publishers, Schema/Enterprise Admins,
+  Key/Enterprise Key Admins) is treated as privileged. Everything else —
+  Everyone, Authenticated Users, Domain Users/Computers, **custom groups, and
+  named accounts** — is treated as low-privilege. The previous blocklist
+  missed custom groups entirely: Enroll granted to a purpose-built group
+  silently produced no ESC1 finding, a domain-compromise-class false negative.
+  The new direction fails toward flagging (a custom *privileged* group may
+  read as noise); the `ACL_GROUP_TOKEN_CAVEAT` estate note now documents both
+  honesty boundaries (no group-token expansion + allowlist classification).
+- **`MIN_COLLECTOR_VERSION` 0.6.0 → 0.8.0**: pre-0.8.0 exports lack the certs
+  pass, per-CA `registry_config_collected`, CAType-derived `kind`, and the
+  PKI-object `acl_obtained` marker, so the stale-collector warning now names
+  them.
+- **JSON envelope `schema_version` 2 → 3**: every finding carries a structured
+  `sid` field (the principal SID for trustee-specific findings, currently
+  ESC7). SARIF renderers read it directly instead of extracting a SID from the
+  free-text detail with a regex (WI-042).
+- **`_finding_with_consequence` deduplicated** into
+  `consequences.finding_with_consequence`, shared by the display and narration
+  layers so the two serializations can never drift (WI-043).
+- Collector: CES/CEP endpoint classification now requires the `_CES_`/`_CEP_`
+  infix or an exact `cep` path segment — a bare substring match false-matched
+  unrelated apps (`/concept`, `/reception`). The `ca-security` pass is marked
+  skipped when no local CA security descriptor was read (e.g. the collector
+  ran on a tier-0 box that is not a CA), so the core's
+  `CA_SECURITY_NOT_EVALUATED` note fires instead of a silent "no ESC7".
+  `LIFECYCLE_NOT_EVALUATED` now names both possible causes (collector predates
+  the certs pass; missing `[certs]` extra). All scripts/comments are pure
+  ASCII with a Pester guard (PS 5.1 BOM-less parse safety, the bug class
+  behind 5a98907).
+
 ## [1.1.2] — 2026-07-16
 
 ### Changed

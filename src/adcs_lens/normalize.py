@@ -7,29 +7,48 @@ Pure, stdlib-only. Kept separate from ingest so detectors that reason about
 
 from __future__ import annotations
 
-# Well-known SIDs that represent a broad/low-privilege set of principals. A
-# privileged right (enroll, write, ManageCA) granted to any of these is the
-# enabling condition behind several ESC classes.
+# Well-known SIDs that name a principal whose compromise is already
+# domain-compromise-class (or the machine/service accounts that hold the keys
+# anyway). A privileged right (enroll, write, ManageCA) granted to one of these
+# is NOT an escalation finding — the trustee already has equivalent or greater
+# power. Anything *outside* this set is treated as low-privilege.
 #
-# Domain-relative RIDs (Domain Users -513, Domain Computers -515) must be matched
-# only under the domain SID prefix S-1-5-21-* — a bare "-515" suffix can belong
-# to an unrelated group (the exact false-match gpo-lens had to fix for MS16-072).
-_ABSOLUTE_LOW_PRIV: frozenset[str] = frozenset(
+# The classification is deliberately an allowlist of high-privilege SIDs rather
+# than a blocklist of broad/low-privilege ones: the earlier blocklist missed
+# custom groups entirely (e.g. Enroll granted to a purpose-built "Help Desk"
+# group silently produced no ESC1 finding — a domain-compromise-class false
+# negative, confirmed against the pre-inversion code). Failing toward flagging
+# is the right direction for a defensive tool: a custom *privileged* group may
+# read as a finding (noise), but no low-privilege trustee is ever silently
+# invisible. Surfaced as the ACL_GROUP_TOKEN_CAVEAT estate note.
+#
+# Domain-relative RIDs (Domain Admins -512, ...) must be matched only under the
+# domain SID prefix S-1-5-21-* — a bare "-512" suffix can belong to an unrelated
+# group (the exact false-match gpo-lens had to fix for MS16-072).
+_ABSOLUTE_HIGH_PRIV: frozenset[str] = frozenset(
     {
-        "S-1-1-0",  # Everyone
-        "S-1-5-2",  # Network (any network-authenticated principal)
-        "S-1-5-4",  # Interactive (any interactively-logged-on principal)
-        "S-1-5-7",  # Anonymous Logon
-        "S-1-5-11",  # Authenticated Users
-        "S-1-5-32-545",  # BUILTIN\Users
-        "S-1-5-32-546",  # BUILTIN\Guests
+        "S-1-5-18",  # Local System
+        "S-1-5-19",  # Local Service
+        "S-1-5-20",  # Network Service
+        "S-1-5-9",  # Enterprise Domain Controllers
+        "S-1-5-32-544",  # BUILTIN\Administrators
+        "S-1-5-32-548",  # Account Operators
+        "S-1-5-32-549",  # Server Operators
+        "S-1-5-32-550",  # Print Operators
+        "S-1-5-32-551",  # Backup Operators
     }
 )
-_DOMAIN_LOW_PRIV_RIDS: frozenset[str] = frozenset(
+_DOMAIN_HIGH_PRIV_RIDS: frozenset[str] = frozenset(
     {
-        "513",  # Domain Users
-        "514",  # Domain Guests
-        "515",  # Domain Computers
+        "500",  # Administrator
+        "502",  # krbtgt
+        "512",  # Domain Admins
+        "516",  # Domain Controllers
+        "517",  # Cert Publishers (holds the CA machine accounts)
+        "518",  # Schema Admins
+        "519",  # Enterprise Admins
+        "526",  # Key Admins
+        "527",  # Enterprise Key Admins
     }
 )
 
@@ -43,15 +62,24 @@ def normalize_sid(sid: str) -> str:
 
 
 def is_low_priv_trustee(sid: str) -> bool:
-    """True if *sid* names a broad/low-privilege principal set.
+    """True unless *sid* names a known high-privilege principal.
+
+    Allowlist semantics: only the curated high-privilege set (built-in admin
+    and operator groups, SYSTEM and service identities, domain trust accounts,
+    and the well-known domain RIDs such as Domain/Enterprise/Schema Admins) is
+    treated as privileged. Every other trustee — Everyone, Authenticated Users,
+    Domain Users/Computers, custom groups, and named user or computer accounts —
+    is treated as low-privilege, so an enabling right granted to any of them is
+    surfaced rather than silently missed.
 
     Domain-relative RIDs only match under the ``S-1-5-21-`` domain prefix, so a
-    coincidental ``*-515`` on an unrelated group does not false-positive.
+    coincidental ``*-512`` on an unrelated well-known SID does not suppress a
+    finding.
     """
     s = normalize_sid(sid)
-    if s in _ABSOLUTE_LOW_PRIV:
-        return True
+    if s in _ABSOLUTE_HIGH_PRIV:
+        return False
     if s.startswith("S-1-5-21-"):
         rid = s.rsplit("-", 1)[-1]
-        return rid in _DOMAIN_LOW_PRIV_RIDS
-    return False
+        return rid not in _DOMAIN_HIGH_PRIV_RIDS
+    return True

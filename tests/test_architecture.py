@@ -23,6 +23,7 @@ CORE_MODULES = [
     "display",
     "cli",
     "suppression",
+    "diff",
 ]
 _SRC = Path(__file__).resolve().parent.parent / "src" / "adcs_lens"
 _FIXTURE = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "build_fixture.py"
@@ -110,3 +111,59 @@ def test_fixture_import_boundary() -> None:
     assert non_stdlib == {"cryptography"}, (
         f"fixture builder imports unexpected non-stdlib modules: {non_stdlib}"
     )
+
+
+def _imports_narration_anywhere(path: Path) -> bool:
+    """True if the file imports the narration layer by any syntax, any scope."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(
+                alias.name == "narration" or alias.name.endswith(".narration")
+                for alias in node.names
+            ):
+                return True
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module == "narration" or module.endswith(".narration"):
+                return True
+            # 'from adcs_lens import narration'
+            if module == "adcs_lens" and any(a.name == "narration" for a in node.names):
+                return True
+    return False
+
+
+def test_core_never_imports_narration() -> None:
+    """The layering rule made executable: narration imports the core, never
+    the reverse.
+
+    ``cli`` is the composition root and may import narration, but only lazily
+    (inside a function) so the core package import graph stays narration-free
+    at module scope. Every other core module must not import it at all. This
+    is the direction guard the stdlib-only test cannot express (narration is
+    itself stdlib-only, so a reverse import would pass the other checks
+    silently).
+    """
+    for mod in CORE_MODULES:
+        if mod == "cli":
+            continue
+        assert not _imports_narration_anywhere(_SRC / f"{mod}.py"), (
+            f"{mod} imports the narration layer — the core must never depend on narration"
+        )
+
+
+def test_cli_imports_narration_only_lazily() -> None:
+    """The CLI may reach narration only inside a function body."""
+    tree = ast.parse((_SRC / "cli.py").read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            assert not any(
+                a.name == "narration" or a.name.endswith(".narration") for a in node.names
+            ), "cli imports narration at module scope"
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            assert not (
+                module == "narration"
+                or module.endswith(".narration")
+                or (module == "adcs_lens" and any(a.name == "narration" for a in node.names))
+            ), "cli imports narration at module scope"

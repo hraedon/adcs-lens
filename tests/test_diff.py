@@ -159,7 +159,7 @@ def test_cli_diff_no_drift_identical_exports(
     assert rc == 0
     env = json.loads(capsys.readouterr().out)
     assert env["kind"] == "diff"
-    assert env["schema_version"] == 2
+    assert env["schema_version"] == 3
     assert env["summary"]["new"] == 0
     assert env["summary"]["resolved"] == 0
     assert env["summary"]["regressions"] is False

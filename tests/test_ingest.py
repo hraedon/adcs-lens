@@ -28,7 +28,7 @@ def test_bom_tolerant(json_export: Path) -> None:
     # collector-manifest.json is written with a UTF-8 BOM; ingest must not choke.
     raw = (json_export / "collector-manifest.json").read_bytes()
     assert raw[:3] == b"\xef\xbb\xbf", "fixture should exercise the BOM path"
-    assert ingest(json_export).manifest.collector_version == "0.6.1-fixture"
+    assert ingest(json_export).manifest.collector_version == "0.8.0-fixture"
 
 
 def test_ca_flags_and_kind(json_export: Path) -> None:
@@ -270,7 +270,9 @@ def test_esc5_detected_end_to_end(json_export: Path) -> None:
     # WI-019). Exercise the full ingest -> PkiObjectAcl -> detect_esc5 pipeline.
     from adcs_lens.detection import run_all
     estate = ingest(json_export)
-    assert len(estate.acls) == 3
+    # 3 readable objects + the CDP container whose DACL was not obtained
+    # (acl_obtained=False -> ESC5 skips it; PKI_ACL_UNREADABLE surfaces it).
+    assert len(estate.acls) == 4
     esc5 = [f for f in run_all(estate) if f.check == "ESC5"]
     assert len(esc5) == 2
     assert all(f.severity == Severity.HIGH for f in esc5)
@@ -339,22 +341,60 @@ def test_compat_warning_for_old_collector() -> None:
     msg = collector_compat_warning(_manifest("0.4.9"))
     assert msg is not None
     assert "0.4.9" in msg
-    assert "0.6.0" in msg
-    assert "owner_sid" in msg  # names the fields that may be absent
+    assert "0.8.0" in msg
+    assert "certs/index.json" in msg  # names the fields that may be absent
     # A v-prefixed stale version is still recognized as stale.
     assert collector_compat_warning(_manifest("v0.4.0")) is not None
 
 
-def test_compat_warning_for_collector_lacking_ca_owner() -> None:
-    # 0.5.0 predates CA owner_sid (ESC7 owner-based control) — it is now stale.
-    assert collector_compat_warning(_manifest("0.5.0")) is not None
+def test_compat_warning_for_collector_lacking_certs_pass() -> None:
+    # 0.7.0 predates the certs/ lifecycle pass (MIN is 0.8.0) — it is stale.
+    assert collector_compat_warning(_manifest("0.7.0")) is not None
 
 
 def test_compat_warning_silent_for_current_collector() -> None:
-    assert collector_compat_warning(_manifest("0.6.0")) is None
+    assert collector_compat_warning(_manifest("0.8.0")) is None
     assert collector_compat_warning(_manifest("1.0.0")) is None
 
 
 def test_compat_warning_silent_for_unparseable_version() -> None:
     # An unknown version cannot be ranked, so it is not flagged stale.
     assert collector_compat_warning(_manifest("unknown")) is None
+
+
+def test_registry_config_collected_defaults_true(json_export: Path) -> None:
+    # The fixture does not emit registry_config_collected -> default True
+    # (pre-field exports read as "collected", no false gap signal).
+    estate = ingest(json_export)
+    assert all(ca.registry_config_collected is True for ca in estate.cas)
+
+
+def test_registry_config_collected_round_trips(json_export: Path) -> None:
+    path = json_export / "ca-config.json"
+    cas = json.loads(path.read_text(encoding="utf-8"))
+    cas[0]["registry_config_collected"] = False
+    path.write_text(json.dumps(cas), encoding="utf-8")
+    estate = ingest(json_export)
+    assert estate.cas[0].registry_config_collected is False
+    assert estate.cas[1].registry_config_collected is True
+
+
+def test_pki_acl_obtained_round_trips(json_export: Path) -> None:
+    # The fixture's CDP container carries acl_obtained=False; the others
+    # default to True.
+    estate = ingest(json_export)
+    by_kind = {a.kind.value: a for a in estate.acls}
+    assert by_kind["cdp"].acl_obtained is False
+    assert by_kind["ntauth"].acl_obtained is True
+    assert by_kind["aia"].acl_obtained is True
+
+
+def test_certs_index_must_be_an_object(tmp_path: Path) -> None:
+    # A certs/index.json that is a JSON array (contract violation) raises
+    # IngestError, not an AttributeError.
+    pytest.importorskip("cryptography")
+    certs_dir = tmp_path / "certs"
+    certs_dir.mkdir()
+    (certs_dir / "index.json").write_text(json.dumps([]), encoding="utf-8")
+    with pytest.raises(IngestError, match="certs/index.json must be an object"):
+        ingest(tmp_path)

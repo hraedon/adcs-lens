@@ -5,17 +5,17 @@ plain-language executive summary. The default mode is deterministic (no AI);
 an optional AI-enhanced mode uses an LLM to refine the narrative, falling
 back to the deterministic summary when the LLM client is unavailable.
 
-This module is OPTIONAL — the core never imports it. It imports the core,
-never the reverse (enforced by the architecture test).
+This module is OPTIONAL — the detection core never imports it; it imports the
+core, never the reverse (enforced by the architecture test: no core module may
+import narration, and the CLI may reach it only lazily, inside a function).
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
 from typing import Protocol
 
-from adcs_lens.consequences import consequence_for
+from adcs_lens.consequences import consequence_for, finding_with_consequence
 from adcs_lens.detection import Finding, is_degradation_note
 from adcs_lens.model import SEVERITY_RANK, Severity
 
@@ -195,25 +195,10 @@ def generate_executive_summary(findings: list[Finding]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _finding_with_consequence(f: Finding) -> dict[str, object]:
-    """Serialize a finding with its plain-language consequence attached."""
-    data: dict[str, object] = dict(asdict(f))
-    entry = consequence_for(f.check)
-    if entry is None:
-        data["consequence"] = None
-    else:
-        data["consequence"] = {
-            "summary": entry.summary,
-            "consequence": entry.consequence,
-            "remediation": entry.remediation,
-        }
-    return data
-
-
 def _build_llm_prompt(findings: list[Finding], deterministic_summary: str) -> str:
     """Assemble the LLM prompt: deterministic summary + findings JSON as context."""
     findings_json = json.dumps(
-        [_finding_with_consequence(f) for f in findings],
+        [finding_with_consequence(f) for f in findings],
         indent=2,
         sort_keys=True,
     )

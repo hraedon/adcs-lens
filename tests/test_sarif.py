@@ -23,6 +23,7 @@ def _f(
     detail: str = "detail",
     source: str = "source",
     tier: CrlTier | None = None,
+    sid: str = "",
 ) -> Finding:
     return Finding(
         check=check,
@@ -32,6 +33,7 @@ def _f(
         detail=detail,
         source=source,
         tier=tier,
+        sid=sid,
     )
 
 
@@ -168,30 +170,25 @@ def test_render_sarif_includes_artifact_location() -> None:
     }
 
 
-def test_render_sarif_esc7_includes_sid_property() -> None:
-    detail = (
-        "Domain Users holds Manage CA (full CA control) on this CA. "
-        "(S-1-5-21-1111111111-2222222222-3333333333-513)"
-    )
-    findings = [_f("ESC7", Severity.CRITICAL, detail=detail)]
+def test_render_sarif_sid_property_from_structured_field() -> None:
+    """The SARIF properties bag carries the finding's structured ``sid`` (WI-042)."""
+    findings = [_f("ESC7", Severity.CRITICAL, sid="S-1-5-21-1111111111-2222222222-3333333333-513")]
     doc = json.loads(render_sarif(findings))
     result = doc["runs"][0]["results"][0]
     assert result["properties"] == {"sid": "S-1-5-21-1111111111-2222222222-3333333333-513"}
 
 
-def test_render_sarif_esc7_owner_sid_extracted_from_parentheses() -> None:
-    detail = (
-        "The owner of this CA's security descriptor "
-        "(S-1-5-21-1-2-3-512) is a low-privilege principal."
-    )
-    findings = [_f("ESC7", Severity.CRITICAL, detail=detail)]
-    doc = json.loads(render_sarif(findings))
-    result = doc["runs"][0]["results"][0]
-    assert result["properties"] == {"sid": "S-1-5-21-1-2-3-512"}
-
-
-def test_render_sarif_esc7_no_sid_property_when_not_present() -> None:
-    findings = [_f("ESC7", Severity.HIGH, detail="No SID in this detail.")]
+def test_render_sarif_no_sid_property_when_field_empty() -> None:
+    """No properties bag when the finding carries no SID — even if the detail
+    text happens to contain a SID-shaped string (WI-042: the renderer never
+    parses SIDs out of free text)."""
+    findings = [
+        _f(
+            "ESC7",
+            Severity.HIGH,
+            detail="The owner of this CA's security descriptor (S-1-5-21-1-2-3-512).",
+        )
+    ]
     doc = json.loads(render_sarif(findings))
     result = doc["runs"][0]["results"][0]
     assert "properties" not in result

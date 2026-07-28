@@ -48,7 +48,7 @@ def build_export(
     _write_json(
         base / "collector-manifest.json",
         {
-            "collector_version": "0.6.1-fixture",
+            "collector_version": "0.8.0-fixture",
             "collected_at": now.isoformat(),
             "host": "LABCA01",
             "domain": DOMAIN,
@@ -297,6 +297,24 @@ def build_export(
                 "kind": "aia",
                 "security": [],
                 "owner_sid": LOW_PRIV_SID,
+            },
+            {
+                # Unreadable-DACL PKI object: the collector ran the pki-acls
+                # pass but this object's nTSecurityDescriptor came back empty
+                # (LDAP denial). It is configured ESC5-positive (low-priv
+                # WriteDacl) to prove ESC5 SKIPS it rather than falsely clearing
+                # it — the PKI_ACL_UNREADABLE gap detector surfaces the gap.
+                "object_dn": "CN=CDP,CN=Public Key Services,...,DC=lab,DC=example,DC=com",
+                "kind": "cdp",
+                "security": [
+                    {
+                        "trustee_sid": LOW_PRIV_SID,
+                        "trustee_name": "Domain Users",
+                        "rights": ["WriteDacl"],
+                        "ace_type": "Allow",
+                    }
+                ],
+                "acl_obtained": False,
             },
         ],
     )

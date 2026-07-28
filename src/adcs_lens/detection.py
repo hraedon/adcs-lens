@@ -238,6 +238,7 @@ _DEGRADATION_NOTES: frozenset[str] = frozenset(
         "ACL_GROUP_TOKEN_CAVEAT",
         "ALTSECID_NOT_EVALUATED",
         "CA_AUDIT_NOT_EVALUATED",
+        "CA_REGISTRY_NOT_EVALUATED",
         "CA_SECURITY_NOT_EVALUATED",
         "DC_REGISTRY_NOT_EVALUATED",
         "ENROLLMENT_ENDPOINTS_NOT_EVALUATED",
@@ -245,6 +246,7 @@ _DEGRADATION_NOTES: frozenset[str] = frozenset(
         "ESC14_ENFORCEMENT_UNKNOWN",
         "LIFECYCLE_NOT_EVALUATED",
         "PKI_ACL_NOT_EVALUATED",
+        "PKI_ACL_UNREADABLE",
         "TEMPLATE_ACL_NOT_EVALUATED",
         "TEMPLATE_ACL_UNREADABLE",
     }
@@ -262,6 +264,11 @@ class Finding:
     detail: str
     source: str  # the exact source fact (registry path, cert file, CRL, ...)
     tier: CrlTier | None = None  # root | issuing for lifecycle findings
+    # Structured principal SID for findings about a specific trustee (currently
+    # ESC7, which reports the low-privilege role holder / owner). Carried as a
+    # first-class field so renderers (e.g. the SARIF properties bag) never parse
+    # it out of free-text detail with a regex (WI-042). Empty when not applicable.
+    sid: str = ""
 
 
 def is_degradation_note(finding: Finding) -> bool:
@@ -286,9 +293,17 @@ def detect_esc6(estate: Estate) -> list[Finding]:
     subordinate CA certs — which is a configuration smell regardless of whether
     the root is currently online. It is surfaced, not silently passed.
     Remediation is the same regardless of tier.
+
+    CAs whose registry configuration was not collected
+    (``registry_config_collected`` False — e.g. a multi-CA estate where the
+    collector ran on a different host) are skipped: an empty ``edit_flags``
+    would read as a silent clean. The ``CA_REGISTRY_NOT_EVALUATED`` note names
+    them.
     """
     findings: list[Finding] = []
     for ca in estate.cas:
+        if not ca.registry_config_collected:
+            continue
         if _EDITF_SAN2 in ca.edit_flags:
             findings.append(
                 Finding(
@@ -770,6 +785,8 @@ def detect_esc5(estate: Estate) -> list[Finding]:
         ]
     findings: list[Finding] = []
     for obj in estate.acls:
+        if not obj.acl_obtained:
+            continue  # unreadable DACL — the PKI_ACL_UNREADABLE note surfaces it
         severity, impact = _ESC5_IMPACT.get(
             obj.kind,
             (Severity.HIGH, "a Public Key Services object"),
@@ -856,6 +873,12 @@ def detect_esc7(estate: Estate) -> list[Finding]:
         ]
     findings: list[Finding] = []
     for ca in estate.cas:
+        # The CA security descriptor is read from the CA host's local registry;
+        # when it was not collected for this CA (registry_config_collected False)
+        # an empty security tuple would read as a silent clean. The
+        # CA_REGISTRY_NOT_EVALUATED note names such CAs.
+        if not ca.registry_config_collected:
+            continue
         by_trustee: dict[str, tuple[str, set[str]]] = {}
         for ace in ca.security:
             if ace.ace_type is not AceType.ALLOW:
@@ -900,6 +923,7 @@ def detect_esc7(estate: Estate) -> list[Finding]:
                         "requests. Remove the role from low-privilege principals."
                     ),
                     source=f"{ca.config_string or ca.name}: CA\\Security",
+                    sid=sid,
                 )
             )
         # Owner-based control (WI-037): a low-privilege owner of CA\\Security can
@@ -921,6 +945,7 @@ def detect_esc7(estate: Estate) -> list[Finding]:
                         "Certificates. Reset ownership to a privileged account."
                     ),
                     source=f"{ca.config_string or ca.name}: CA\\Security owner",
+                    sid=ca.owner_sid,
                 )
             )
     return findings
@@ -1091,9 +1116,15 @@ def detect_esc16(estate: Estate) -> list[Finding]:
     CRITICAL) because, like ESC9/ESC11, exploitation requires an external
     precondition (weak DC binding enforcement) — it is an enabling
     configuration, not a direct primitive like ESC6.
+
+    CAs whose registry configuration was not collected are skipped (an empty
+    ``disabled_extensions`` would read as clean); the
+    ``CA_REGISTRY_NOT_EVALUATED`` note names them.
     """
     findings: list[Finding] = []
     for ca in estate.cas:
+        if not ca.registry_config_collected:
+            continue
         if ca.kind is CaKind.ROOT:
             continue
         if _NTDS_CA_SECURITY_EXT in ca.disabled_extensions:
@@ -1359,6 +1390,76 @@ def detect_esc14(estate: Estate) -> list[Finding]:
     return findings
 
 
+def detect_ca_registry_gaps(estate: Estate) -> list[Finding]:
+    """Flag CAs whose registry-derived configuration was not collected.
+
+    The CA registry hives (policy EditFlags, InterfaceFlags, AuditFilter,
+    DisableExtensionList, CA\\Security) are read locally on the CA host. In a
+    multi-CA estate the collector captures them only for the CA it runs on;
+    every other CA ships with empty registry fields, which would otherwise read
+    as silently clean for ESC6/ESC16 (absent flags match nothing), silently
+    skipped for ESC7 (no ACEs to evaluate), or — worst — a false ESC11 finding
+    (that detector fires on the *absence* of a flag). Those detectors skip
+    CAs with ``registry_config_collected`` False; this emits one INFO note per
+    such CA so the gap is named rather than hidden.
+    """
+    findings: list[Finding] = []
+    for ca in estate.cas:
+        if ca.registry_config_collected:
+            continue
+        findings.append(
+            Finding(
+                check="CA_REGISTRY_NOT_EVALUATED",
+                severity=Severity.INFO,
+                title=f"CA registry configuration not collected for {ca.name}",
+                subject=ca.name,
+                detail=(
+                    f"{ca.name} is not the CA the collector ran on, so its "
+                    "registry-derived configuration (EditFlags, InterfaceFlags, "
+                    "AuditFilter, DisableExtensionList, CA\\Security) was not "
+                    "captured and ESC6/ESC7/ESC11/ESC16 were skipped for it. Re-run "
+                    f"the collector on {ca.dns or ca.name} (or on each CA) for "
+                    "full coverage."
+                ),
+                source=f"{ca.config_string or ca.name}: registry_config_collected=false",
+            )
+        )
+    return findings
+
+
+def detect_pki_acl_gaps(estate: Estate) -> list[Finding]:
+    """Flag PKI objects whose DACL was requested but not obtained.
+
+    The PKI-object analogue of :func:`detect_template_acl_gaps`: when the
+    ``pki-acls`` pass ran but an individual object's ``nTSecurityDescriptor``
+    came back unreadable (LDAP denial, corrupt SD), ESC5 cannot evaluate it and
+    it would otherwise silently pass — indistinguishable from a genuinely safe
+    object. One INFO note per such object; ESC5 skips them.
+    """
+    if _PKI_ACLS_PASS in estate.manifest.skipped_passes:
+        return []  # the pass-level PKI_ACL_NOT_EVALUATED note covers it
+    findings: list[Finding] = []
+    for obj in estate.acls:
+        if obj.acl_obtained:
+            continue
+        findings.append(
+            Finding(
+                check="PKI_ACL_UNREADABLE",
+                severity=Severity.INFO,
+                title="PKI object DACL was requested but not obtained",
+                subject=obj.object_dn or obj.kind.value,
+                detail=(
+                    "The collector ran the pki-acls pass but this object's "
+                    "nTSecurityDescriptor came back empty (LDAP denial or corrupt "
+                    "SD), so its ESC5 control rights could not be evaluated. "
+                    "Re-collect with adequate read rights on the object."
+                ),
+                source=f"{obj.object_dn or obj.kind.value}: nTSecurityDescriptor not obtained",
+            )
+        )
+    return findings
+
+
 def detect_template_acl_gaps(estate: Estate) -> list[Finding]:
     """Flag templates whose DACL was requested but not obtained.
 
@@ -1414,9 +1515,17 @@ def detect_esc11(estate: Estate) -> list[Finding]:
 
     Root CAs are excluded by design: a two-tier offline root does not serve RPC
     client enrollment, so flagging it would be a false positive.
+
+    CAs whose registry configuration was not collected are skipped — the flag
+    lives in the registry, so an absent read would otherwise produce a false
+    "flag not set" finding on every remote CA (the one detector whose trigger
+    is the *absence* of a value). The ``CA_REGISTRY_NOT_EVALUATED`` note names
+    them.
     """
     findings: list[Finding] = []
     for ca in estate.cas:
+        if not ca.registry_config_collected:
+            continue
         if ca.kind is CaKind.ROOT:
             continue
         if _ESC11_FLAG in ca.interface_flags:
@@ -1626,10 +1735,13 @@ def detect_infra_cert_expiry(
                 title="Certificate lifecycle not evaluated",
                 subject="(estate)",
                 detail=(
-                    "The export was ingested without DER cert/CRL parsing, so CA/CRL "
-                    "expiry, weak signing algorithm, and CA-cert key-size checks were "
-                    "skipped. Install the optional extra (pip install adcs-lens[certs]) "
-                    "and re-run to evaluate these lifecycle and crypto-hygiene checks."
+                    "No cert/CRL data was parsed from this export, so CA/CRL expiry, "
+                    "weak signing algorithm, and CA-cert key-size checks were skipped. "
+                    "Two possible causes, most likely first: the collector did not "
+                    "capture the certs pass (re-run a collector >= 0.8.0, which reads "
+                    "the published CA certs and CRLs from AD), or adcs-lens was "
+                    "installed without the [certs] extra (pip install "
+                    "adcs-lens[certs]) needed to parse them."
                 ),
                 source="collector-manifest.json: certs_parsed=false",
             )
@@ -2058,12 +2170,22 @@ def detect_acl_coverage_caveats(estate: Estate) -> list[Finding]:
     """Emit an estate-level note on the ACL-modeling boundary (WI-033).
 
     The ACL-gated detectors (ESC1–ESC5, ESC7, ESC9, ESC13, ESC15) reason about the ACE
-    trustee SID directly: nested-group membership is not expanded, so a Deny on a
-    group containing the requester, or Enroll/control rights held only
-    transitively via group membership, are not modeled. The *absence* of an ACL
-    finding is therefore not by itself proof that no ACL path exists. This note
-    surfaces that caveat in the output (not only in a source comment) whenever
-    ACL reasoning actually ran, so a reader never over-trusts a clean ACL result.
+    trustee SID directly, with two honesty boundaries:
+
+    * **No group-token expansion.** Nested-group membership is not modeled: a Deny
+      on a group containing the requester, or Enroll/control rights held only
+      transitively via group membership, are invisible. The *absence* of an ACL
+      finding is therefore not by itself proof that no ACL path exists.
+    * **Allowlist trustee classification.** A trustee is treated as privileged
+      only when its SID is in the curated high-privilege set (built-in admin and
+      operator groups, SYSTEM/service identities, domain trust accounts, and the
+      well-known admin RIDs); everything else — including custom groups and
+      named accounts — is treated as low-privilege. This fails toward flagging:
+      a custom *privileged* group may produce a finding that is really noise.
+
+    This note surfaces both boundaries in the output (not only in source
+    comments) whenever ACL reasoning actually ran, so a reader never over-trusts
+    an ACL result in either direction.
 
     Fires once per estate when any ACL input is present (a template, PKI object,
     or CA carrying a security descriptor). A minimal export with no ACLs has no
@@ -2082,16 +2204,22 @@ def detect_acl_coverage_caveats(estate: Estate) -> list[Finding]:
         Finding(
             check="ACL_GROUP_TOKEN_CAVEAT",
             severity=Severity.INFO,
-            title="ACL findings do not expand group membership",
+            title="ACL findings: no group expansion; allowlist trustee classification",
             subject="(estate)",
             detail=(
                 "ESC1–ESC5, ESC7, ESC9, ESC13, and ESC15 match ACEs on the trustee SID "
-                "directly; nested-group tokens are not expanded. A Deny on a group "
-                "containing the requester, or Enroll/control rights held only via "
-                "group membership, are not modeled. Confirm ACL-derived conclusions "
-                "directly in AD when a 'no finding' result is load-bearing."
+                "directly; nested-group tokens are not expanded, so a Deny on a group "
+                "containing the requester, or rights held only via group membership, "
+                "are not modeled. Trustees are classified by a high-privilege SID "
+                "allowlist: any trustee outside it (custom groups, named accounts) is "
+                "treated as low-privilege, which fails toward flagging — a custom "
+                "privileged group may read as a finding. Confirm ACL-derived "
+                "conclusions directly in AD when one is load-bearing."
             ),
-            source="detection.py: ACL trustee-SID matching (no group-token expansion)",
+            source=(
+                "detection.py: ACL trustee-SID matching (no group-token expansion; "
+                "high-priv allowlist classification)"
+            ),
         )
     ]
 
@@ -2251,6 +2379,8 @@ def run_all(
         *detect_esc10(estate),
         *detect_esc14(estate),
         *detect_template_acl_gaps(estate),
+        *detect_pki_acl_gaps(estate),
+        *detect_ca_registry_gaps(estate),
         *detect_esc11(estate),
         *detect_esc13(estate),
         *detect_esc15(estate),

@@ -8,18 +8,20 @@ from __future__ import annotations
 
 import html
 import json
-import re
 from collections import Counter
-from dataclasses import asdict
 from urllib.parse import quote
 
 from adcs_lens import __version__
-from adcs_lens.consequences import consequence_for
+from adcs_lens.consequences import consequence_for, finding_with_consequence
 from adcs_lens.detection import Finding
 from adcs_lens.diff import DriftReport
 from adcs_lens.model import Severity
 
-SCHEMA_VERSION = 2
+# Envelope shape history:
+#   2 — every finding gains a `consequence` block (the value-delivery layer).
+#   3 — every finding gains a `sid` field (WI-042: the structured principal
+#       SID replaces the detail-text regex extraction).
+SCHEMA_VERSION = 3
 
 _SARIF_LEVEL: dict[Severity, str] = {
     Severity.CRITICAL: "error",
@@ -35,34 +37,10 @@ def _artifact_uri(source: str) -> str:
     return f"file:///adcs-lens/{quote(source, safe='')}"
 
 
-_SID_RE = re.compile(r"(S-1(?:-\d+)+)")
-
-
-def _extract_sid(detail: str) -> str | None:
-    """Best-effort SID extraction for ESC7 properties bag."""
-    match = _SID_RE.search(detail)
-    return match.group(1) if match else None
-
-
 def summarize(findings: list[Finding]) -> dict[str, int]:
     """Count findings by severity (every severity key present, zero-filled)."""
     counts = Counter(f.severity.value for f in findings)
     return {sev.value: counts.get(sev.value, 0) for sev in Severity}
-
-
-def _finding_with_consequence(f: Finding) -> dict[str, object]:
-    """Serialize a finding with its plain-language consequence attached."""
-    data = asdict(f)
-    entry = consequence_for(f.check)
-    if entry is None:
-        data["consequence"] = None
-    else:
-        data["consequence"] = {
-            "summary": entry.summary,
-            "consequence": entry.consequence,
-            "remediation": entry.remediation,
-        }
-    return data
 
 
 def render_json(
@@ -75,7 +53,7 @@ def render_json(
         "schema_version": SCHEMA_VERSION,
         "kind": "doctor",
         "summary": summarize(findings),
-        "findings": [_finding_with_consequence(f) for f in findings],
+        "findings": [finding_with_consequence(f) for f in findings],
     }
     if suppressions is not None:
         envelope["suppressions"] = suppressions
@@ -117,8 +95,8 @@ def render_diff_json(report: DriftReport) -> str:
             "unchanged": report.unchanged,
             "regressions": report.regressions,
         },
-        "new": [_finding_with_consequence(f) for f in report.new],
-        "resolved": [_finding_with_consequence(f) for f in report.resolved],
+        "new": [finding_with_consequence(f) for f in report.new],
+        "resolved": [finding_with_consequence(f) for f in report.resolved],
         "changed": [
             {
                 "check": d.new.check,
@@ -190,10 +168,8 @@ def _diff_sarif_result(
             }
         ],
     }
-    if f.check == "ESC7":
-        sid = _extract_sid(f.detail)
-        if sid:
-            result["properties"] = {"sid": sid}
+    if f.sid:
+        result["properties"] = {"sid": f.sid}
     return result
 
 
@@ -425,10 +401,8 @@ def render_sarif(findings: list[Finding]) -> str:
                 }
             ],
         }
-        if f.check == "ESC7":
-            sid = _extract_sid(f.detail)
-            if sid:
-                result["properties"] = {"sid": sid}
+        if f.sid:
+            result["properties"] = {"sid": f.sid}
         results.append(result)
 
     sarif = {

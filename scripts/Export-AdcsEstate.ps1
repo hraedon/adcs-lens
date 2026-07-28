@@ -5,24 +5,35 @@
 .DESCRIPTION
   Captures the inputs the adcs-lens deterministic core ingests, READ-ONLY:
     * CA registry config via `certutil -getreg` (policy EditFlags, CA
-      InterfaceFlags, AuditFilter, policy DisableExtensionList) — read locally
-      on the CA host.
+      InterfaceFlags, AuditFilter, CAType, policy DisableExtensionList) - read
+      locally on the CA host.
     * AD Public Key Services objects via LDAP (enrollment services, certificate
-      templates, enterprise OIDs).
+      templates, enterprise OIDs, PKI-object security descriptors).
+    * Published CA certificates and CRLs via LDAP (the AIA and CDP containers
+      in the Configuration NC), written as DER + certs/index.json so the
+      lifecycle detectors (CA cert/CRL expiry, weak algorithms) can run.
 
   It NEVER enrolls, requests, writes, or relays. It only reads. Output is a
   directory of JSON files matching adcs_lens.ingest's contract.
+
+  Registry-derived configuration is read locally, so it is attributed only to
+  the CA running on the collector host. Other CAs found in Enrollment Services
+  are exported with registry_config_collected = false; the core's registry-
+  gated detectors (ESC6/ESC7/ESC11/ESC16) skip them and an estate-level note
+  names them. Re-run on each CA for full coverage.
 
   Auth: by default the script uses the current user's integrated Windows
   credentials (run as a Domain Admin or an account with read access to the
   PKI container). This mirrors the gpo-lens collector's approach and is the
   simplest path when running interactively on the CA or a tier-0 admin box.
 
-  For key-based SSH sessions (where the network credential is not delegated —
+  For key-based SSH sessions (where the network credential is not delegated -
   the double-hop problem), pass explicit LDAP credentials via -LdapUserB64 /
-  -LdapPassB64 (base64-encoded to avoid quoting + argv exposure). When both
-  are provided, the script binds with them; when neither is provided, it
-  binds with integrated auth.
+  -LdapPassB64. Base64 is used to survive quoting/escaping through SSH and
+  PowerShell invocation layers; note it is NOT secrecy - the credential is
+  still visible to local process inspection and script-block logging, like
+  any command-line argument. When both are provided, the script binds with
+  them; when neither is provided, it binds with integrated auth.
 
 .PARAMETER OutDir
   Directory to write the export into (created if absent).
@@ -67,7 +78,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$COLLECTOR_VERSION = '0.7.0'
+$COLLECTOR_VERSION = '0.8.0'
 
 function _b64([string]$s) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($s)) }
 
@@ -86,7 +97,7 @@ function _writeJson($obj, [string]$name) {
 # _ldapEntry builds a DirectoryEntry with or without explicit credentials.
 # When $LdapUser is set (explicit creds via -LdapUserB64), it binds with them
 # (needed for key-based SSH / double-hop). When $LdapUser is empty (the
-# default), it binds with the current user's integrated credentials — mirroring
+# default), it binds with the current user's integrated credentials - mirroring
 # the gpo-lens collector's approach of assuming DA when running interactively.
 function _ldapEntry([string]$path) {
   if ($LdapUser) {
@@ -108,7 +119,7 @@ function _search([DirectoryServices.DirectoryEntry]$root, [string]$filter) {
   $s.Filter = $filter; $s.PageSize = 200; $s.SearchScope = 'Subtree'
   # Request the DACL *and* Owner so nTSecurityDescriptor comes back with ACEs
   # and the owner SID (read-only). Owner is needed for ESC4/ESC5 owner-based
-  # control — without it the owner_sid is always empty (v0.6.0 bug fix).
+  # control - without it the owner_sid is always empty (v0.6.0 bug fix).
   $s.SecurityMasks = [DirectoryServices.SecurityMasks]'Dacl,Owner'
   $s.FindAll()
 }
@@ -201,20 +212,60 @@ function _classifyApp([string]$p) {
   $l = $p.ToLower()
   if ($l -match 'mscep') { return 'ndes' }            # NDES/SCEP
   if ($l -match 'certsrv') { return 'web_enrollment' } # /certsrv
-  if ($l -match '_ces_' -or $l -match 'cep') { return 'ces' }
+  # CES/CEP: the _CES_ / _CEP_ infix (the default CEP endpoint names, e.g.
+  # /ADPolicyProvider_CEP_Kerberos, /contoso_CES_Kerberos) or a path *segment*
+  # that is exactly "cep". A bare substring match on 'cep' would false-match
+  # unrelated apps (e.g. "/concept", "/reception"); require boundaries instead.
+  if ($l -match '_ces_' -or $l -match '_cep_' -or $l -match '(^|/)cep($|/)') { return 'ces' }
   return $null
+}
+
+# --- CA kind from certutil CAType (CaKind in the core model) -----------------
+# CA\CAType REG_DWORD: 0 = Enterprise Root, 1 = Enterprise Subordinate,
+# 3 = Standalone Root, 4 = Standalone Subordinate. Enterprise CAs (0/1) map to
+# 'issuing': they are online and serve AD-integrated enrollment, so the RPC/
+# SID-extension checks (ESC11/ESC16) legitimately apply to them. A standalone
+# root (3) maps to 'root' (the detectors' offline-root exclusions apply); a
+# standalone subordinate (4) maps to 'standalone'. Unknown/unread -> 'issuing'
+# (the pre-0.8.0 default, so behavior does not change when CAType is absent).
+function _caKindFromType($t) {
+  if ($null -eq $t) { return 'issuing' }
+  switch ([int]$t) {
+    0 { 'issuing'; return }
+    1 { 'issuing'; return }
+    3 { 'root'; return }
+    4 { 'standalone'; return }
+    default { 'issuing'; return }
+  }
+}
+
+# --- cert/CRL helpers (the certs/ lifecycle pass) ----------------------------
+# Filesystem-safe name for a DER file derived from a CA / object name.
+function _safeFileName([string]$name) {
+  ($name -replace '[^A-Za-z0-9._-]', '_')
+}
+# Classify a DER certificate as root_ca (self-signed: subject == issuer) or
+# issuing_ca. Returns 'other' when the bytes cannot be parsed. Pure: works on
+# any pwsh with .NET X509Certificate2, so the Pester suite can exercise it.
+function _certKindFromDer([byte[]]$der) {
+  if (-not $der -or $der.Length -eq 0) { return 'other' }
+  try {
+    $c = New-Object Security.Cryptography.X509Certificates.X509Certificate2(,$der)
+    if ($c.Subject -eq $c.Issuer) { return 'root_ca' }
+    return 'issuing_ca'
+  } catch { return 'other' }
 }
 
 # --- nTSecurityDescriptor -> ACEs (ESC1/ESC4/ESC5/ESC7 inputs) --------------
 # Extended-right GUIDs we care about; an all-zero ObjectType on an ExtendedRight
 # ACE means "all extended rights" (which includes Enroll). The same all-zero
-# ObjectType on a WriteProperty ACE means "write *all* properties" (blanket) —
+# ObjectType on a WriteProperty ACE means "write *all* properties" (blanket) -
 # emitted as 'WritePropertyAll' so ESC4 can flag it (a blanket WriteProperty can
-# rewrite msPKI-Certificate-Name-Flag → ESC1). A non-zero ObjectType scopes the
+# rewrite msPKI-Certificate-Name-Flag -> ESC1). A non-zero ObjectType scopes the
 # write to one property/property-set and is emitted as 'WriteProperty:<guid>'
 # (lower-cased) so the core can match it against the dangerous-property GUID map
 # (WI-019). A bare 'WriteProperty' (no GUID) from an older collector stays
-# excluded — the scope is unknown.
+# excluded - the scope is unknown.
 $ENROLL_GUID     = '0e10c968-78fb-11d2-90d4-00c04f79dc55'
 $AUTOENROLL_GUID = 'a05b8cc2-17b1-4cc8-8b00-94f99c9c2cca'
 $ZERO_GUID       = '00000000-0000-0000-0000-000000000000'
@@ -255,7 +306,7 @@ function _parseAces([byte[]]$sdBytes) {
 
 # --- PKI object DACLs (ESC5) ------------------------------------------------
 # Read the nTSecurityDescriptor on a single object (Base scope) and tokenise its
-# ACEs via _parseAces. Pure LDAP against the Configuration NC — no certutil, so
+# ACEs via _parseAces. Pure LDAP against the Configuration NC - no certutil, so
 # this pass runs from any domain member with the explicit bind creds.
 function _objAcl([string]$dn, [string]$kind) {
   $de = _ldapEntry "LDAP://$dn"
@@ -266,7 +317,10 @@ function _objAcl([string]$dn, [string]$kind) {
   try { $r = $s.FindOne() } catch { return $null }   # object absent / no read
   if (-not $r) { return $null }
   $sdb = if ($r.Properties['ntsecuritydescriptor'].Count) { [byte[]]$r.Properties['ntsecuritydescriptor'][0] } else { $null }
-  [ordered]@{ object_dn = $dn; kind = $kind; owner_sid = (_readOwner $sdb); security = (_parseAces $sdb) }
+  [ordered]@{
+    object_dn = $dn; kind = $kind; owner_sid = (_readOwner $sdb)
+    security = (_parseAces $sdb); acl_obtained = ($null -ne $sdb)
+  }
 }
 # Enumerate child objects under a container and tokenise each one's DACL.
 function _childAcls([string]$containerDn, [string]$filter, [string]$kind) {
@@ -275,13 +329,16 @@ function _childAcls([string]$containerDn, [string]$filter, [string]$kind) {
   foreach ($r in (_search $root $filter)) {
     $dn  = [string]$r.Properties['distinguishedname'][0]
     $sdb = if ($r.Properties['ntsecuritydescriptor'].Count) { [byte[]]$r.Properties['ntsecuritydescriptor'][0] } else { $null }
-    $out += [ordered]@{ object_dn = $dn; kind = $kind; owner_sid = (_readOwner $sdb); security = (_parseAces $sdb) }
+    $out += [ordered]@{
+      object_dn = $dn; kind = $kind; owner_sid = (_readOwner $sdb)
+      security = (_parseAces $sdb); acl_obtained = ($null -ne $sdb)
+    }
   }
   ,$out
 }
 
 function _readOwner([byte[]]$sdBytes) {
-  # The security descriptor Owner (a SID) — a low-priv owner can rewrite the
+  # The security descriptor Owner (a SID) - a low-priv owner can rewrite the
   # DACL to grant itself control (ESC4/ESC5 owner-based path, WI-019). Returns
   # the owner SID string, or '' when the SD is absent/malformed/has no owner.
   if (-not $sdBytes -or $sdBytes.Length -eq 0) { return '' }
@@ -337,7 +394,7 @@ function _rawSdOwner([byte[]]$bytes) {
 }
 
 # The CA\Security owner (ESC7 owner-based control, WI-037). A low-priv owner of
-# the CA security descriptor can rewrite the DACL to grant itself Manage CA — the
+# the CA security descriptor can rewrite the DACL to grant itself Manage CA - the
 # CA-level analogue of ESC4/ESC5 owner control. Returns the owner SID string, or
 # '' when the SD is absent/malformed/has no owner. Reads the same registry value
 # as _caSecurityAces via the same RawSecurityDescriptor parser.
@@ -364,7 +421,7 @@ if ($PSCmdlet.ParameterSetName -eq 'SelfTest') { return }
 # explicit LDAP binds (needed for key-based SSH / double-hop). When both are
 # omitted (the default), leave $LdapUser/$LdapPass empty so _ldapEntry binds
 # with the current user's integrated credentials. Providing only one is an
-# error — a half-specified credential pair would silently bind as the wrong
+# error - a half-specified credential pair would silently bind as the wrong
 # identity.
 $LdapUser = ''
 $LdapPass = ''
@@ -404,6 +461,13 @@ $editFlags      = _certutilFlags 'policy\EditFlags'
 $interfaceFlags = _certutilFlags 'CA\InterfaceFlags'
 $auditFilter    = _certutilDword 'CA\AuditFilter'
 $disabledExt    = _certutilMultiSz 'policy\DisableExtensionList'
+$caType         = _certutilDword 'CA\CAType'
+
+# Registry hives are LOCAL to the collector host: the CA they describe is the
+# local one. Resolve the local identity once (short + FQDN) so enrollment
+# services for OTHER CAs are not mis-attributed this host's registry config.
+$localHost = ([string](hostname)).ToLower()
+try { $localFqdn = ([System.Net.Dns]::GetHostEntry($localHost).HostName).ToLower() } catch { $localFqdn = $localHost }
 
 # --- enrollment services (CAs) ----------------------------------------------
 $enrollRoot = _ldapRoot 'CN=Enrollment Services'
@@ -414,22 +478,65 @@ foreach ($r in (_search $enrollRoot '(objectClass=pKIEnrollmentService)')) {
   $cn = [string]$p['cn'][0]; $dns = [string]$p['dnshostname'][0]
   $templates = @(); foreach ($t in $p['certificatetemplates']) { $templates += [string]$t }
   $enrollmentServices[$cn] = $templates
+  $caHost = ([string]$dns -split '\.')[0].ToLower()
+  # The local CA: its common name matches certutil's AND its dns host is this
+  # machine. Everything else is remote: its registry-derived fields stay empty
+  # and registry_config_collected=false tells the core those detectors were
+  # NOT evaluated for this CA (a named gap, never a silent clean).
+  $isLocal = ($caCommonName -and $cn -eq $caCommonName -and
+              $caHost -and ($caHost -eq $localHost -or $dns.ToLower() -eq $localFqdn))
+  if ($isLocal) {
+    $caConfig += [ordered]@{
+      name           = $cn
+      dns            = $dns
+      config_string  = "$dns\$cn"
+      kind           = (_caKindFromType $caType)
+      edit_flags     = (@($editFlags))
+      interface_flags= (@($interfaceFlags))
+      audit_filter   = $auditFilter
+      # Collector cannot yet read CA build/patch level statically (ESC15 / CVE-2024-49019).
+      # Emitting 'unknown' lets the detector degrade the ESC15 finding to MEDIUM; a
+      # future enhancement may populate this from the OS build.
+      ca_patch_state = 'unknown'
+      disabled_extensions = (@($disabledExt))
+      # CA\Security owner (ESC7 owner-based control, WI-037). Empty when the local
+      # registry SD could not be read; the ESC7 detector then skips owner control.
+      owner_sid      = (_caSecurityOwner $cn)
+      registry_config_collected = $true
+    }
+  } else {
+    $caConfig += [ordered]@{
+      name           = $cn
+      dns            = $dns
+      config_string  = "$dns\$cn"
+      kind           = 'issuing'   # enterprise by definition (it is in Enrollment Services)
+      edit_flags     = (@())
+      interface_flags= (@())
+      audit_filter   = $null
+      ca_patch_state = 'unknown'
+      disabled_extensions = (@())
+      owner_sid      = ''
+      registry_config_collected = $false
+    }
+  }
+}
+
+# A CA not published as an enrollment service (a standalone CA is never in
+# Enrollment Services) is invisible to the LDAP pass above. If the LOCAL host
+# is such a CA, add it so its registry config is still evaluated.
+if ($caCommonName -and -not ($caConfig | Where-Object { $_.name -eq $caCommonName })) {
   $caConfig += [ordered]@{
-    name           = $cn
-    dns            = $dns
-    config_string  = "$dns\$cn"
-    kind           = 'issuing'
+    name           = $caCommonName
+    dns            = $localFqdn
+    config_string  = "$localFqdn\$caCommonName"
+    kind           = (_caKindFromType $caType)
     edit_flags     = (@($editFlags))
     interface_flags= (@($interfaceFlags))
     audit_filter   = $auditFilter
-    # Collector cannot yet read CA build/patch level statically (ESC15 / CVE-2024-49019).
-    # Emitting 'unknown' lets the detector degrade the ESC15 finding to MEDIUM; a
-    # future enhancement may populate this from the OS build.
     ca_patch_state = 'unknown'
     disabled_extensions = (@($disabledExt))
-    # CA\Security owner (ESC7 owner-based control, WI-037). Empty when the local
-    # registry SD could not be read; the ESC7 detector then skips owner control.
-    owner_sid      = (_caSecurityOwner $cn)
+    owner_sid      = (_caSecurityOwner $caCommonName)
+    registry_config_collected = $true
   }
 }
 
@@ -455,7 +562,7 @@ foreach ($r in (_search $tmplRoot '(objectClass=pKICertificateTemplate)')) {
     min_key_size      = if ($p['mspki-minimal-key-size'].Count) { [int]$p['mspki-minimal-key-size'][0] } else { $null }
     issuance_policy_oids = (@($pol))
     csp               = (($csps -join ', ').ToLower())
-    security          = (_parseAces $sdb)   # template DACL → ACEs (ESC1/ESC4)
+    security          = (_parseAces $sdb)   # template DACL -> ACEs (ESC1/ESC4)
     acl_obtained      = ($null -ne $sdb)    # SD requested & obtained (per-template gap signal)
     owner_sid         = (_readOwner $sdb)
   }
@@ -467,7 +574,7 @@ $oids = @()
 foreach ($r in (_search $oidRoot '(objectClass=msPKI-Enterprise-Oid)')) {
   $p = $r.Properties
   # The OID->group link (ESC13) is msDS-OIDToGroupLink (a group DN), NOT
-  # msPKI-OIDToGroupLink — the latter does not exist, so the old name always
+  # msPKI-OIDToGroupLink - the latter does not exist, so the old name always
   # read $null and ESC13 could never fire on real data.
   $gl = if ($p['msds-oidtogrouplink'].Count) { [string]$p['msds-oidtogrouplink'][0] } else { $null }
   $oids += [ordered]@{
@@ -493,6 +600,16 @@ foreach ($pair in @(
     @("CN=Enrollment Services,$pksDn",               'pks_container'))) {
   $a = _objAcl $pair[0] $pair[1]
   if ($a) { $pkiAcls += $a }
+  else {
+    # The object is one of the well-known fixed containers but could not be
+    # read at all (LDAP denial). Emit a gap marker (acl_obtained=$false) so
+    # ESC5 does not silently clear it - the PKI-object analogue of the
+    # template-level gap signal.
+    $pkiAcls += [ordered]@{
+      object_dn = $pair[0]; kind = $pair[1]; owner_sid = ''
+      security = @(); acl_obtained = $false
+    }
+  }
 }
 # Individual CA objects: trusted roots + issuing enrollment services.
 $pkiAcls += _childAcls "CN=Certification Authorities,$pksDn" '(objectClass=certificationAuthority)' 'ca_object'
@@ -500,8 +617,73 @@ $pkiAcls += _childAcls "CN=Enrollment Services,$pksDn"       '(objectClass=pKIEn
 
 # --- CA role security (ESC7) -------------------------------------------------
 # Keyed by the CA name used in ca-config.json so ingest joins them to the CA.
+# The descriptor lives in the CA host's LOCAL registry, so only CAs whose
+# registry config was collected can yield ACEs. When NO CA yields any (e.g.
+# the collector ran on a tier-0 box that is not a CA), the pass effectively
+# did not run: mark it skipped so the core emits its CA_SECURITY_NOT_EVALUATED
+# note instead of a silent "no ESC7 findings".
 $caSecurity = [ordered]@{}
-foreach ($ca in $caConfig) { $caSecurity[$ca.name] = (_caSecurityAces $ca.name) }
+$anyCaSecurity = $false
+foreach ($ca in $caConfig) {
+  $aces = if ($ca.registry_config_collected) { ,(_caSecurityAces $ca.name) } else { ,@() }
+  # _caSecurityAces returns a wrapped array; normalise before counting/storing.
+  $flat = @($aces | ForEach-Object { $_ })
+  $caSecurity[$ca.name] = $flat
+  if ($flat.Count -gt 0) { $anyCaSecurity = $true }
+}
+
+# --- CA certificates + CRLs (lifecycle path, plan 001 certs/) ----------------
+# Published CA certs (AIA container children, cACertificate) and base CRLs (CDP
+# container children, certificateRevocationList), read from AD via plain LDAP -
+# no certutil, so this runs from any domain member. Crucially it captures the
+# OFFLINE ROOT's cert and CRL from their published locations: the root box is
+# powered off by design, so its expired CRL is the catastrophic-but-invisible
+# case this pass exists to make detectable. Delta CRLs (deltaRevocationList)
+# are skipped; only the base CRL gates chain validation.
+$certsSkipped = $true
+$certIndex = @()
+$crlIndex = @()
+$caKindByName = @{}
+try {
+  $certDir = Join-Path $OutDir 'certs'
+  $i = 0
+  foreach ($r in (_search (_ldapRoot 'CN=AIA') '(objectClass=certificationAuthority)')) {
+    $p = $r.Properties
+    $cn = [string]$p['cn'][0]
+    foreach ($blob in $p['cacertificate']) {
+      $der = [byte[]]$blob
+      $kind = _certKindFromDer $der
+      if (-not $caKindByName.ContainsKey($cn)) { $caKindByName[$cn] = $kind }
+      New-Item -ItemType Directory -Force -Path $certDir | Out-Null
+      $file = '{0:d2}-{1}.cer' -f $i, (_safeFileName $cn); $i++
+      [IO.File]::WriteAllBytes((Join-Path $certDir $file), $der)
+      # ca_name joins to ca-config.json by CA common name at ingest. For an
+      # enterprise CA the AIA child's CN IS the CA common name; a mismatch
+      # would leave the cert unattached (a coverage gap, not a false finding).
+      $certIndex += [ordered]@{ file = $file; ca_name = $cn; kind = $kind }
+    }
+  }
+  $j = 0
+  foreach ($r in (_search (_ldapRoot 'CN=CDP') '(objectClass=cRLDistributionPoint)')) {
+    $p = $r.Properties
+    $cn = [string]$p['cn'][0]
+    if (-not $p['certificaterevocationlist'].Count) { continue }
+    $der = [byte[]]$p['certificaterevocationlist'][0]
+    New-Item -ItemType Directory -Force -Path $certDir | Out-Null
+    $file = '{0:d2}-{1}.crl' -f $j, (_safeFileName $cn); $j++
+    [IO.File]::WriteAllBytes((Join-Path $certDir $file), $der)
+    # Tier by the issuing CA's self-signedness when known; default issuing.
+    $tier = if ($caKindByName.ContainsKey($cn) -and $caKindByName[$cn] -eq 'root_ca') { 'root' } else { 'issuing' }
+    $crlIndex += [ordered]@{
+      file   = $file
+      tier   = $tier
+      source = "AD CDP container: $([string]$p['distinguishedname'][0])"
+    }
+  }
+  if ($certIndex.Count -gt 0 -or $crlIndex.Count -gt 0) { $certsSkipped = $false }
+} catch {
+  Write-Warning "certs pass failed: $($_.Exception.Message)"
+}
 
 # --- HTTP enrollment endpoints (ESC8) ---------------------------------------
 # IIS bindings + Windows-auth + Extended Protection on the Web Enrollment
@@ -600,7 +782,7 @@ if ($CollectDcMapping) {
       }
       $sch = $reg.GetDWORDValue($HKLM, 'SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL', 'CertificateMappingMethods')
       if ($sch.ReturnValue -eq 0 -and $null -ne $sch.uValue) {
-        # _decode iterates entries by key/value — indexing an [ordered] dict with
+        # _decode iterates entries by key/value - indexing an [ordered] dict with
         # an int key selects BY POSITION, which silently mis-decodes the bits.
         $schannelMethods = _decode ([int]$sch.uValue) $SCHANNEL_BITS
       }
@@ -624,7 +806,9 @@ if ($CollectDcMapping) {
 }
 
 # --- manifest ----------------------------------------------------------------
-$skippedPasses = @('certs')                                   # cert/CRL DER ([certs] extra)
+$skippedPasses = @()
+if ($certsSkipped) { $skippedPasses += 'certs' }              # cert/CRL DER ([certs] extra)
+if (-not $anyCaSecurity) { $skippedPasses += 'ca-security' }  # CA\Security registry SD (ESC7)
 if ($endpointsSkipped) { $skippedPasses += 'enrollment-endpoints' }
 if ($esc10Skipped) { $skippedPasses += 'esc10-dc-registry' }
 if ($esc14Skipped) { $skippedPasses += 'esc14-altsecid' }
@@ -646,7 +830,10 @@ _writeJson @($dcConfigs) 'dc-config.json'
 _writeJson @($principalMappings) 'principal-mappings.json'
 _writeJson $enrollmentServices 'enrollment-services.json'
 _writeJson $caSecurity   'ca-security.json'
+if (-not $certsSkipped) {
+  _writeJson ([ordered]@{ certs = @($certIndex); crls = @($crlIndex) }) 'certs/index.json'
+}
 _writeJson $manifest     'collector-manifest.json'
 
-Write-Output ("OK cas={0} templates={1} oids={2} pkiacls={3} endpoints={4} dcs={5} altsecid={6} editflags=[{7}] ca={8}" -f `
-  $caConfig.Count, $templates.Count, $oids.Count, $pkiAcls.Count, $webEndpoints.Count, $dcConfigs.Count, $principalMappings.Count, ($editFlags -join ','), $caCommonName)
+Write-Output ("OK cas={0} templates={1} oids={2} pkiacls={3} endpoints={4} dcs={5} altsecid={6} certs={7} crls={8} editflags=[{9}] ca={10}" -f `
+  $caConfig.Count, $templates.Count, $oids.Count, $pkiAcls.Count, $webEndpoints.Count, $dcConfigs.Count, $principalMappings.Count, $certIndex.Count, $crlIndex.Count, ($editFlags -join ','), $caCommonName)

@@ -241,6 +241,13 @@ class CertAuthority:
     # not a false positive). A low-priv owner can rewrite the CA DACL to grant
     # itself Manage CA — the CA-level analogue of ESC4/ESC5 owner control.
     owner_sid: str = ""
+    # False when this CA's registry-derived configuration (edit flags, interface
+    # flags, audit filter, disabled extensions, CA\Security) was not collected —
+    # e.g. the collector ran on a different host than this CA, since those hives
+    # are read locally. Registry-gated detectors (ESC6/ESC7/ESC11/ESC16) skip
+    # such CAs and an estate-level note names them, so a remote CA never reads
+    # as silently clean. Default True so pre-field exports read as "collected".
+    registry_config_collected: bool = True
 
 
 @dataclass(frozen=True)
@@ -283,6 +290,12 @@ class PkiObjectAcl:
     # ESC5 detector then skips owner-based control (a known gap, not a false
     # positive). A low-priv owner can rewrite the object's DACL.
     owner_sid: str = ""
+    # True when the collector obtained this object's nTSecurityDescriptor.
+    # False means the object exists but its descriptor could not be read (LDAP
+    # denial, corrupt SD) — ESC5 must skip it rather than silently clearing it,
+    # and a PKI_ACL_UNREADABLE note surfaces the gap (the PKI-object analogue of
+    # the template acl_obtained marker). Default True for pre-field exports.
+    acl_obtained: bool = True
 
 
 @dataclass(frozen=True)

@@ -10,6 +10,7 @@ from adcs_lens.detection import (
     _AUDIT_CATEGORIES,
     detect_acl_coverage_caveats,
     detect_audit_config,
+    detect_ca_registry_gaps,
     detect_cdp_aia_absence,
     detect_esc1,
     detect_esc2,
@@ -26,6 +27,7 @@ from adcs_lens.detection import (
     detect_infra_cert_expiry,
     detect_ocsp_absence,
     detect_orphaned_templates,
+    detect_pki_acl_gaps,
     detect_template_acl_gaps,
     detect_weak_key_size,
     detect_weak_signing,
@@ -121,6 +123,7 @@ def _ca(
     disabled_extensions: tuple[str, ...] = (),
     ca_patch_state: CaPatchState = CaPatchState.UNKNOWN,
     owner_sid: str = "",
+    registry_config_collected: bool = True,
 ) -> CertAuthority:
     return CertAuthority(
         name=name,
@@ -135,6 +138,7 @@ def _ca(
         disabled_extensions=frozenset(disabled_extensions),
         ca_patch_state=ca_patch_state,
         owner_sid=owner_sid,
+        registry_config_collected=registry_config_collected,
     )
 
 
@@ -182,8 +186,12 @@ def _pki_acl(
     dn: str = "CN=Obj,CN=Public Key Services,CN=Services,CN=Configuration,DC=x",
     security: tuple[AceEntry, ...] = (),
     owner_sid: str = "",
+    acl_obtained: bool = True,
 ) -> PkiObjectAcl:
-    return PkiObjectAcl(object_dn=dn, kind=kind, security=security, owner_sid=owner_sid)
+    return PkiObjectAcl(
+        object_dn=dn, kind=kind, security=security, owner_sid=owner_sid,
+        acl_obtained=acl_obtained,
+    )
 
 
 def _endpoint(
@@ -2627,3 +2635,123 @@ def test_cdp_aia_absent_wired_into_run_all() -> None:
     ca = _ca("IssuingCA", certs=(cert,))
     checks = {f.check for f in run_all(_estate(cas=(ca,)))}
     assert "CDP_AIA_ABSENT" in checks
+
+
+# --- CA registry-config gap (multi-CA honesty) ----------------------------
+
+
+def test_esc11_skips_uncollected_ca() -> None:
+    """A remote CA ships empty interface flags; ESC11 must not fire on the absence."""
+    ca = _ca("RemoteCA", interface_flags=(), registry_config_collected=False)
+    assert detect_esc11(_estate(cas=(ca,))) == []
+
+
+def test_esc6_skips_uncollected_ca() -> None:
+    ca = _ca("RemoteCA", edit_flags=(), registry_config_collected=False)
+    assert detect_esc6(_estate(cas=(ca,))) == []
+
+
+def test_esc16_skips_uncollected_ca() -> None:
+    ca = _ca("RemoteCA", disabled_extensions=(), registry_config_collected=False)
+    assert detect_esc16(_estate(cas=(ca,))) == []
+
+
+def test_esc7_skips_uncollected_ca() -> None:
+    ca = _ca(
+        "RemoteCA",
+        security=(),
+        owner_sid=LOW_PRIV_SID,
+        registry_config_collected=False,
+    )
+    assert detect_esc7(_estate(cas=(ca,))) == []
+
+
+def test_ca_registry_gap_note_per_uncollected_ca() -> None:
+    local = _ca("LocalCA", edit_flags=("EDITF_ATTRIBUTESUBJECTALTNAME2",))
+    remote = _ca("RemoteCA", registry_config_collected=False)
+    findings = detect_ca_registry_gaps(_estate(cas=(local, remote)))
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.check == "CA_REGISTRY_NOT_EVALUATED"
+    assert f.severity is Severity.INFO
+    assert f.subject == "RemoteCA"
+    assert is_degradation_note(f)
+
+
+def test_ca_registry_gap_note_wired_into_run_all() -> None:
+    remote = _ca("RemoteCA", registry_config_collected=False)
+    checks = {f.check for f in run_all(_estate(cas=(remote,)))}
+    assert "CA_REGISTRY_NOT_EVALUATED" in checks
+    assert "ESC11" not in checks
+
+
+# --- PKI object ACL gap (ESC5 honesty) --------------------------------------
+
+
+def test_esc5_skips_unreadable_object() -> None:
+    obj = _pki_acl(
+        AclKind.NTAUTH,
+        security=(_ctrl_ace(right="WriteDacl"),),
+        acl_obtained=False,
+    )
+    assert detect_esc5(_estate(acls=(obj,))) == []
+
+
+def test_pki_acl_gap_note_flagged() -> None:
+    obj = _pki_acl(AclKind.NTAUTH, acl_obtained=False)
+    findings = detect_pki_acl_gaps(_estate(acls=(obj,)))
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.check == "PKI_ACL_UNREADABLE"
+    assert f.severity is Severity.INFO
+    assert is_degradation_note(f)
+
+
+def test_pki_acl_gap_silent_when_pass_skipped() -> None:
+    obj = _pki_acl(AclKind.NTAUTH, acl_obtained=False)
+    assert detect_pki_acl_gaps(_estate(acls=(obj,), skipped_passes=("pki-acls",))) == []
+
+
+def test_pki_acl_gap_note_wired_into_run_all() -> None:
+    obj = _pki_acl(AclKind.NTAUTH, acl_obtained=False)
+    checks = {f.check for f in run_all(_estate(acls=(obj,)))}
+    assert "PKI_ACL_UNREADABLE" in checks
+    assert "ESC5" not in checks
+
+
+# --- ESC7 structured SID (WI-042) --------------------------------------------
+
+
+def test_esc7_role_finding_carries_trustee_sid() -> None:
+    ca = _ca(
+        "CA",
+        security=(_ctrl_ace(sid=LOW_PRIV_SID, right="ManageCA"),),
+    )
+    findings = detect_esc7(_estate(cas=(ca,)))
+    assert len(findings) == 1
+    assert findings[0].sid == LOW_PRIV_SID
+
+
+def test_esc7_owner_finding_carries_owner_sid() -> None:
+    ca = _ca("CA", owner_sid=LOW_PRIV_SID)
+    findings = detect_esc7(_estate(cas=(ca,)))
+    assert len(findings) == 1
+    assert findings[0].sid == LOW_PRIV_SID
+
+
+# --- Allowlist trustee classification through the detectors -------------------
+
+
+def test_esc1_fires_for_custom_group_enroll() -> None:
+    """The false-negative fix: a custom (non-well-known) group holding Enroll
+    on an ESC1-positive template now flags (pre-inversion it was invisible)."""
+    custom_group_sid = "S-1-5-21-1111111111-2222222222-3333333333-1601"
+    tmpl = _template(security=(_enroll_ace(sid=custom_group_sid),))
+    findings = detect_esc1(_estate(templates=(tmpl,)))
+    assert len(findings) == 1
+    assert findings[0].check == "ESC1"
+
+
+def test_esc1_still_quiet_for_domain_admins_enroll() -> None:
+    tmpl = _template(security=(_enroll_ace(sid=HIGH_PRIV_SID),))
+    assert detect_esc1(_estate(templates=(tmpl,))) == []

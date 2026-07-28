@@ -7,7 +7,7 @@ misconfiguration, and certificate lifecycle. The deterministic core has **no AI
 in the truth path** — the LLM layer only narrates facts the core already
 computed.
 
-> **Project status:** stable at v1.1.2 and feature-complete for its charter
+> **Project status:** stable at v1.2.0 and feature-complete for its charter
 > (the full statically-detectable ESC family plus lifecycle/hygiene checks).
 > Not under active development; maintained passively — security reports (see
 > `SECURITY.md`) and bug reports are welcome, but there is no feature roadmap

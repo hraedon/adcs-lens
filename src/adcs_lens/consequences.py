@@ -2,11 +2,19 @@
 
 Pure data mapping each detector check identifier to a non-technical summary,
 business risk, and remediation. Used by the display and report layers; no AI.
+
+Also hosts :func:`finding_with_consequence`, the single serialization of a
+finding + its catalogue entry shared by the JSON/diff renderers (display.py)
+and the narration layer (narration.py) so the two can never drift (WI-043).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from adcs_lens.detection import Finding
 
 
 @dataclass(frozen=True)
@@ -477,29 +485,63 @@ CONSEQUENCES: dict[str, ConsequenceEntry] = {
     ),
     "LIFECYCLE_NOT_EVALUATED": ConsequenceEntry(
         check="LIFECYCLE_NOT_EVALUATED",
-        summary="The export was ingested without parsing DER certificates and CRLs.",
+        summary="No certificate or CRL data was parsed from this export.",
         consequence=(
             "The tool cannot detect expired or soon-to-expire CA certificates and CRLs, so "
             "lifecycle failures are hidden for this run."
         ),
         remediation=(
-            "Install the optional certificates extra and re-ingest the export with DER cert/CRL "
-            "parsing enabled."
+            "Re-run collector 0.8.0 or newer (it captures the published CA certificates and "
+            "CRLs from AD), and install the optional certificates extra "
+            "(pip install adcs-lens[certs]) so adcs-lens can parse them."
+        ),
+    ),
+    "CA_REGISTRY_NOT_EVALUATED": ConsequenceEntry(
+        check="CA_REGISTRY_NOT_EVALUATED",
+        summary=(
+            "A certificate authority's registry configuration was not collected because the "
+            "collector ran on a different host."
+        ),
+        consequence=(
+            "The CA registry checks (requester-supplied SANs, RPC encryption enforcement, "
+            "disabled extensions, CA role permissions) were skipped for this CA, so "
+            "weaknesses there are hidden."
+        ),
+        remediation=(
+            "Re-run the collector on each certificate authority (or on the named CA) so its "
+            "local registry hives are captured."
+        ),
+    ),
+    "PKI_ACL_UNREADABLE": ConsequenceEntry(
+        check="PKI_ACL_UNREADABLE",
+        summary="A Public Key Services object's security descriptor could not be read.",
+        consequence=(
+            "The tool cannot tell whether a low-privilege principal controls this object, so "
+            "a writable-ACL escalation path (ESC5) may be hidden."
+        ),
+        remediation=(
+            "Re-collect with an account that has read access to the named object's "
+            "nTSecurityDescriptor."
         ),
     ),
     "ACL_GROUP_TOKEN_CAVEAT": ConsequenceEntry(
         check="ACL_GROUP_TOKEN_CAVEAT",
         summary=(
-            "Access-control findings match ACEs by trustee SID and do not expand group membership."
+            "Access-control findings match ACEs by trustee SID, do not expand group "
+            "membership, and classify trustees by a high-privilege allowlist."
         ),
         consequence=(
             "A Deny on a group that contains the requester, or Enroll and control rights held only "
-            "through nested group membership, are not modeled. A 'no finding' result is therefore "
-            "not by itself proof that no access-control escalation path exists."
+            "through nested group membership, are not modeled — so a 'no finding' result is not "
+            "by itself proof that no access-control escalation path exists. In the other "
+            "direction, any trustee outside the known high-privilege set (custom groups, named "
+            "accounts) is treated as low-privilege, so a custom privileged group may produce a "
+            "finding that is really noise."
         ),
         remediation=(
             "When an ACL conclusion is load-bearing, confirm it directly in Active Directory with "
-            "the requester's full group token expanded."
+            "the requester's full group token expanded, and review findings whose trustee is a "
+            "custom group to confirm whether it is genuinely low-privilege."
         ),
     ),
     "ORPHANED_TEMPLATE": ConsequenceEntry(
@@ -550,3 +592,24 @@ CONSEQUENCES: dict[str, ConsequenceEntry] = {
 def consequence_for(check: str) -> ConsequenceEntry | None:
     """Return the plain-language entry for *check*, or None if unknown."""
     return CONSEQUENCES.get(check)
+
+
+def finding_with_consequence(f: Finding) -> dict[str, object]:
+    """Serialize a finding with its plain-language consequence attached.
+
+    The one implementation of the finding+consequence JSON shape, shared by
+    display.py (the doctor/diff JSON envelopes) and narration.py (the LLM
+    context payload). ``consequence`` is ``None`` for a check with no catalogue
+    entry. (WI-043: previously duplicated between display and narration.)
+    """
+    data: dict[str, object] = dict(asdict(f))
+    entry = consequence_for(f.check)
+    if entry is None:
+        data["consequence"] = None
+    else:
+        data["consequence"] = {
+            "summary": entry.summary,
+            "consequence": entry.consequence,
+            "remediation": entry.remediation,
+        }
+    return data

@@ -51,16 +51,22 @@ class IngestError(ValueError):
 
 
 # The oldest collector version whose export the core reads at full precision.
-# A collector older than this may omit fields the detectors branch on (csp,
-# owner_sid, ca_patch_state); the core still degrades honestly, but a stale
-# export should not read as silently clean. Warn, do not fail (WI-031). MIN is
-# 0.6.0 because CA\\Security owner_sid (ESC7 owner-based control, a CRITICAL-class
-# path) landed then — a pre-0.6.0 export silently lacks it and that path can't
-# fire, so the warning is what keeps the gap visible.
-MIN_COLLECTOR_VERSION = "0.6.0"
+# A collector older than this may omit fields the detectors branch on; the
+# core still degrades honestly, but a stale export should not read as silently
+# clean. Warn, do not fail (WI-031). MIN is 0.8.0 because that release added
+# the certs/ lifecycle pass (the whole CA cert/CRL expiry family), per-CA
+# registry_config_collected (multi-CA honesty), the CA kind from CAType, and
+# the PKI-object acl_obtained gap marker — a pre-0.8.0 export silently lacks
+# all of them, so the warning is what keeps the gap visible.
+MIN_COLLECTOR_VERSION = "0.8.0"
 # Fields a collector at/above MIN is expected to emit; named in the warning so
 # an operator knows which detectors may degrade on a stale export.
-_STALE_COLLECTOR_FIELDS = ("csp", "owner_sid", "ca_patch_state")
+_STALE_COLLECTOR_FIELDS = (
+    "certs/index.json",
+    "registry_config_collected",
+    "kind",
+    "acl_obtained (pki-acls)",
+)
 
 
 def _parse_version(s: str) -> tuple[int, int, int] | None:
@@ -265,6 +271,8 @@ def ingest(export_dir: str | Path) -> Estate:
     # LIFECYCLE_NOT_EVALUATED note rather than silently passing as "clean".
     certs_parsed = False
     if certs_mod is not None and index is not None:
+        if not isinstance(index, dict):
+            raise IngestError("certs/index.json must be an object with 'certs'/'crls' arrays")
         for entry in _require_list(base, "certs/index.json", index.get("certs", [])):
             path = _cert_file_path(base, entry)
             try:
@@ -323,6 +331,9 @@ def ingest(export_dir: str | Path) -> Estate:
                     default="unknown",
                 ),
                 owner_sid=normalize_sid(_coerce_str(ca.get("owner_sid", ""))),
+                registry_config_collected=_coerce_bool(
+                    ca.get("registry_config_collected"), default=True
+                ),
             )
         )
 
@@ -366,6 +377,7 @@ def ingest(export_dir: str | Path) -> Estate:
             kind=_kind(a.get("kind", ""), AclKind, "PKI ACL kind", default="pks_container"),
             security=_aces(a.get("security")),
             owner_sid=normalize_sid(_coerce_str(a.get("owner_sid", ""))),
+            acl_obtained=_coerce_bool(a.get("acl_obtained"), default=True),
         )
         for a in acls_data
     )
